@@ -99,9 +99,11 @@ def _dispatch_homogeneous(
     water: WaterParams, beam: BeamParams,
     link_range_m: float, cfg: SimConfig,
     seed: np.random.SeedSequence,
+    n_photons: int | None = None,
 ) -> PhotonRecord:
     nw           = cfg.n_workers
-    base, rem    = divmod(cfg.n_photons, nw)
+    total        = cfg.n_photons if n_photons is None else n_photons
+    base, rem    = divmod(total, nw)
     batches      = [base + (1 if i < rem else 0) for i in range(nw)]
     worker_seeds = seed.spawn(nw)
 
@@ -122,9 +124,11 @@ def _dispatch_inhomogeneous(
     medium: MediumProfile, beam: BeamParams,
     link_range_m: float, cfg: SimConfig,
     seed: np.random.SeedSequence,
+    n_photons: int | None = None,
 ) -> PhotonRecord:
     nw           = cfg.n_workers
-    base, rem    = divmod(cfg.n_photons, nw)
+    total        = cfg.n_photons if n_photons is None else n_photons
+    base, rem    = divmod(total, nw)
     batches      = [base + (1 if i < rem else 0) for i in range(nw)]
     worker_seeds = seed.spawn(nw)
 
@@ -152,42 +156,52 @@ def _adaptive_loop(
     label: str,
     verbose: bool,
 ) -> RunResult:
-    """Repeat dispatch_fn until min_captured_photons or max_launched_photons."""
-    all_records: List[PhotonRecord] = []
+    """Launch batches until the received-power estimate converges.
+
+    Stopping rule
+    -------------
+    After each batch of ``cfg.conv_batch_photons`` photons, a running
+    relative standard error of the mean received power is updated via
+    ``power_rel_error``.  The loop stops when
+
+        status.n_batches >= cfg.min_conv_batches   and
+        status.rel_error  <  cfg.rel_error_tol
+
+    ``cfg.max_launched_photons`` is only an emergency safeguard for runs
+    whose capture rate is so low they never reach the tolerance.
+    """
+    all_records:   List[PhotonRecord] = []
     power_samples: List[float] = []
     n_captured = 0
     n_launched = 0
     round_num  = 0
     cap_hit    = False
-    converged = False
-    rel_tol = getattr(cfg, "rel_error_tol", 0.05)
-    min_batches = max(3, getattr(cfg, "min_conv_batches", 3))
+    converged  = False
+    rel_tol     = cfg.rel_error_tol
+    min_batches = max(2, cfg.min_conv_batches)        # >=2 for a finite SE
+    status      = power_rel_error(power_samples)      # sentinel: rel_error=inf
 
     while True:
         round_num += 1
-        batch_n = min(getattr(cfg, "conv_batch_photons", cfg.n_photons), cfg.max_launched_photons - n_launched)
+        batch_n = min(cfg.conv_batch_photons,
+                      cfg.max_launched_photons - n_launched)
         if batch_n <= 0:
             cap_hit = True
             break
-        old_n = cfg.n_photons
+
         if verbose:
-            print(f"      launching round {round_num} batch={batch_n:,}", flush=True)
-        try:
-            object.__setattr__(cfg, "n_photons", batch_n)
-        except Exception:
-            pass
-        rec        = dispatch_fn(seed)
-        try:
-            object.__setattr__(cfg, "n_photons", old_n)
-        except Exception:
-            pass
+            print(f"      launching round {round_num} batch={batch_n:,}",
+                  flush=True)
+
+        # Pass the per-round batch size explicitly — no shared-state mutation.
+        rec         = dispatch_fn(seed, batch_n)
         n_launched += batch_n
         new_cap     = rec["weight"].size
         if new_cap > 0:
             all_records.append(rec)
             n_captured += new_cap
 
-        batch_power = float(np.sum(rec["weight"])) / batch_n if batch_n else 0.0
+        batch_power = float(np.sum(rec["weight"])) / batch_n
         power_samples.append(batch_power)
         status = power_rel_error(power_samples)
 
@@ -210,9 +224,13 @@ def _adaptive_loop(
             break
 
     if cap_hit:
-        print(f"  ⚠  {label}: max photons reached before convergence. rel_err={status.rel_error:.4f}", flush=True)
+        print(f"  ⚠  {label}: max photons reached before convergence "
+              f"(rel_err={status.rel_error:.4f}, {n_launched:,} launched)",
+              flush=True)
     elif verbose and converged:
-        print(f"  ✓ {label}: converged at rel_err={status.rel_error:.4f} after {status.n_batches} batches ({n_launched:,} launched)", flush=True)
+        print(f"  ✓ {label}: converged at rel_err={status.rel_error:.4f} "
+              f"after {status.n_batches} batches ({n_launched:,} launched)",
+              flush=True)
 
     return RunResult(_concat_records(all_records), n_launched)
 
@@ -221,19 +239,19 @@ def _adaptive_loop(
 # Public single-run functions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_one(water, beam, link_range_m, cfg, seed) -> RunResult:
+def run_one(water, beam, link_range_m, cfg, seed, verbose=False) -> RunResult:
     return RunResult(_dispatch_homogeneous(water, beam, link_range_m, cfg, seed),
                      cfg.n_photons)
 
 
-def run_one_inhomogeneous(medium, beam, link_range_m, cfg, seed) -> RunResult:
+def run_one_inhomogeneous(medium, beam, link_range_m, cfg, seed, verbose=False) -> RunResult:
     return RunResult(_dispatch_inhomogeneous(medium, beam, link_range_m, cfg, seed),
                      cfg.n_photons)
 
 
 def run_one_adaptive(water, beam, link_range_m, cfg, seed, verbose=False) -> RunResult:
     return _adaptive_loop(
-        lambda s: _dispatch_homogeneous(water, beam, link_range_m, cfg, s),
+        lambda s, n: _dispatch_homogeneous(water, beam, link_range_m, cfg, s, n),
         cfg, seed, f"{water.name}|{beam.name}|{link_range_m:.0f}m", verbose,
     )
 
@@ -241,7 +259,7 @@ def run_one_adaptive(water, beam, link_range_m, cfg, seed, verbose=False) -> Run
 def run_one_inhomogeneous_adaptive(medium, beam, link_range_m, cfg, seed,
                                    verbose=False) -> RunResult:
     return _adaptive_loop(
-        lambda s: _dispatch_inhomogeneous(medium, beam, link_range_m, cfg, s),
+        lambda s, n: _dispatch_inhomogeneous(medium, beam, link_range_m, cfg, s, n),
         cfg, seed, f"{medium.name}|{beam.name}|{link_range_m:.0f}m", verbose,
     )
 
@@ -259,14 +277,14 @@ def _run_sweep(run_fn, entities, beams, cfg, seed_offset, verbose) -> Dict[RunKe
     for (entity, beam, Z), seed in zip(combos, seeds):
         key = RunKey(entity.name, beam.name, float(Z))
         if verbose:
-            print(f"  [{entity.name} | {beam.name} | {Z:.0f} m]")
-        result = run_fn(entity, beam, Z, cfg, seed)
+            print(f"  [{entity.name} | {beam.name} | {Z:.0f} m]", flush=True)
+        result = run_fn(entity, beam, Z, cfg, seed, verbose=verbose)
         results[key] = result
         if verbose:
             n  = result.weights.size
             pct = 100.0 * n / result.n_launched
             print(f"    → {n:,} captured | {result.n_launched:,} launched "
-                  f"| {pct:.3f}% | {time.perf_counter()-t0:.1f}s\n")
+                  f"| {pct:.3f}% | {time.perf_counter()-t0:.1f}s\n", flush=True)
     return results
 
 
