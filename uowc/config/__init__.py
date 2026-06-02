@@ -17,6 +17,10 @@ from typing import Tuple
 
 import numpy as np
 
+# Metric names recognised by the convergence framework
+# (see uowc.simulation.convergence). Listed here only for documentation;
+# the authoritative registry lives in that module.
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Physical constants
@@ -109,6 +113,17 @@ class SimConfig:
     conv_batch_photons: int = 1_000_000
     rel_error_tol: float = 0.05
     min_conv_batches: int = 3
+    # ── Multi-metric convergence ─────────────────────────────────────────
+    # Which metrics must converge before the adaptive loop stops.  The loop
+    # stops only when ALL listed metrics meet their tolerance.  Recognised
+    # names: "power", "delay_spread", "bandwidth", "cir",
+    # "frequency_response" (extend via convergence.register_metric).
+    # Default is power-only for backward compatibility — opt into more, e.g.
+    #     conv_metrics=("power", "delay_spread", "cir")
+    conv_metrics: Tuple[str, ...] = ("power",)
+    # Optional per-metric tolerance overrides as (name, tol) pairs; metrics
+    # not listed fall back to rel_error_tol.  e.g. (("cir", 0.10),)
+    conv_tols: Tuple[Tuple[str, float], ...] = ()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

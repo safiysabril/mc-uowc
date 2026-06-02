@@ -33,7 +33,7 @@ from uowc.config import (
 )
 from uowc.medium import MediumProfile
 from uowc.transport import propagate_batch, propagate_batch_inhomogeneous, PhotonRecord
-from uowc.simulation.convergence import power_rel_error
+from uowc.simulation.convergence import build_monitor
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,30 +156,27 @@ def _adaptive_loop(
     label: str,
     verbose: bool,
 ) -> RunResult:
-    """Launch batches until the received-power estimate converges.
+    """Launch batches until all required metrics converge (multi-metric).
 
     Stopping rule
     -------------
-    After each batch of ``cfg.conv_batch_photons`` photons, a running
-    relative standard error of the mean received power is updated via
-    ``power_rel_error``.  The loop stops when
+    Each batch of ``cfg.conv_batch_photons`` photons is fed to a
+    :class:`~uowc.simulation.convergence.ConvergenceMonitor` built from
+    ``cfg.conv_metrics``.  Every metric tracks its own batch-means relative
+    standard error; the loop stops only when **all required** metrics satisfy
 
-        status.n_batches >= cfg.min_conv_batches   and
-        status.rel_error  <  cfg.rel_error_tol
+        n_samples >= cfg.min_conv_batches   and   rel_error < tolerance
 
-    ``cfg.max_launched_photons`` is only an emergency safeguard for runs
-    whose capture rate is so low they never reach the tolerance.
+    ``cfg.max_launched_photons`` is only an emergency safeguard for runs whose
+    capture rate is so low that a metric never reaches its tolerance.
     """
-    all_records:   List[PhotonRecord] = []
-    power_samples: List[float] = []
+    monitor = build_monitor(cfg)
+    all_records: List[PhotonRecord] = []
     n_captured = 0
     n_launched = 0
     round_num  = 0
     cap_hit    = False
     converged  = False
-    rel_tol     = cfg.rel_error_tol
-    min_batches = max(2, cfg.min_conv_batches)        # >=2 for a finite SE
-    status      = power_rel_error(power_samples)      # sentinel: rel_error=inf
 
     while True:
         round_num += 1
@@ -201,21 +198,19 @@ def _adaptive_loop(
             all_records.append(rec)
             n_captured += new_cap
 
-        batch_power = float(np.sum(rec["weight"])) / batch_n
-        power_samples.append(batch_power)
-        status = power_rel_error(power_samples)
+        monitor.update(rec, batch_n)
 
         if verbose:
             rate = 100.0 * n_captured / n_launched if n_launched else 0.0
             print(
                 f"      round {round_num:>3}: +{new_cap:>6,}  "
                 f"caps {n_captured:>7,} ({rate:.3f}%)  "
-                f"rel_err={status.rel_error:.4f} "
+                f"{monitor.report()}  "
                 f"[{n_launched/1e6:.1f}M launched]",
                 flush=True,
             )
 
-        if status.n_batches >= min_batches and status.rel_error < rel_tol:
+        if monitor.converged:
             converged = True
             break
 
@@ -224,12 +219,13 @@ def _adaptive_loop(
             break
 
     if cap_hit:
+        pending = ", ".join(monitor.unconverged_names()) or "none"
         print(f"  ⚠  {label}: max photons reached before convergence "
-              f"(rel_err={status.rel_error:.4f}, {n_launched:,} launched)",
+              f"(unconverged: {pending}; {n_launched:,} launched)",
               flush=True)
     elif verbose and converged:
-        print(f"  ✓ {label}: converged at rel_err={status.rel_error:.4f} "
-              f"after {status.n_batches} batches ({n_launched:,} launched)",
+        print(f"  ✓ {label}: all metrics converged after {round_num} batches "
+              f"({n_launched:,} launched) — {monitor.report()}",
               flush=True)
 
     return RunResult(_concat_records(all_records), n_launched)
