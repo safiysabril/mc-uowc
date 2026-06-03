@@ -46,54 +46,99 @@ pip install -e .
 ## Quick start
 
 ```bash
-# Run the full pipeline — homogeneous + inhomogeneous, metrics, plots, Parquet export
-python main.py all
+# Step 1 — run the simulation (accumulates photons into Parquet each time)
+python main.py homogeneous --out ./outputs
+python main.py homogeneous --out ./outputs   # run again to accumulate more photons
+python main.py homogeneous --out ./outputs   # keep going until counts look good
 
-# Homogeneous simulation only (Clear Water / Coastal Water, two beams, five ranges)
-python main.py homogeneous
+# Step 2 — compute metrics and export to CSV (for paper tables / analysis)
+python metrics.py --out ./outputs
 
-# Inhomogeneous simulation only (Woodcock delta-tracking, three stratified profiles)
-python main.py inhomogeneous
-
-# Regenerate all figures from previously saved Parquet data (no re-simulation)
-python main.py plots
-
-# Write outputs to a custom directory
-python main.py all --out ./results
+# Step 3 — generate all figures
+python plot.py --out ./outputs
 ```
+
+The photon count table printed after each `main.py` run shows `good`, `sparse`,
+`very sparse`, or `TOO FEW` per (medium, beam, range). Run `main.py` as many
+times as needed before invoking `metrics.py` or `plot.py`.
 
 ### Running from Python
 
 ```python
-import numpy as np
-from uowc.config import SIM, CLEAR_WATER, COLLIMATED, RECEIVER
-from uowc.transport import propagate_batch
+from uowc.config import SIM, CLEAR_WATER
 from uowc.metrics import compute_all_metrics
 from uowc.simulation import run_sweep_adaptive, RunKey
+from uowc.analysis import to_dataframe, append_to_parquet
 
-# One-shot adaptive sweep over all preset water types and beam geometries
+# Adaptive sweep over all preset water types and beam geometries
 results = run_sweep_adaptive(SIM, verbose=True)
 
-key = RunKey("Clear Water", "Collimated (Laser)", 10.0)
+# Inspect one combination
+key     = RunKey("Clear Water", "Collimated (Laser)", 10.0)
 metrics = compute_all_metrics(results[key], SIM, CLEAR_WATER.c, link_range=10.0)
-print(f"Received power : {metrics['power_dB']:.2f} dB")
+print(f"Received power  : {metrics['power_dB']:.2f} dB")
 print(f"RMS delay spread: {metrics['delay_spread_s']*1e9:.3f} ns")
 print(f"3 dB bandwidth  : {metrics['bandwidth_hz']/1e6:.1f} MHz")
+
+# Accumulate photons into Parquet (safe to call repeatedly)
+c_ref_map = {RunKey("Clear Water", "Collimated (Laser)", float(Z)): CLEAR_WATER.c
+             for Z in SIM.link_ranges_m}
+df = to_dataframe(results, c_ref_map=c_ref_map)
+append_to_parquet(df, "./outputs/photons_homogeneous.parquet")
 ```
 
 ---
 
 ## CLI reference
 
-### `main.py` — simulation + plotting
+### `metrics.py` — compute metrics and export for paper analysis
+
+```bash
+# Scalar metrics → CSV (one row per medium / beam / range combination)
+python metrics.py --out ./outputs
+
+# Also save CIR and frequency-response arrays as compressed .npz
+python metrics.py --out ./outputs --arrays
+
+# Explicit Parquet paths
+python metrics.py --hom outputs/photons_homogeneous.parquet
+```
+
+CSV columns:
+
+| Column | Description |
+|---|---|
+| `power_dB` | MC received power (dB) |
+| `beer_lambert_dB` | Beer-Lambert reference power (dB) |
+| `power_excess_dB` | MC − Beer-Lambert (scattering gain/loss) |
+| `delay_spread_ns` | RMS delay spread (ns) |
+| `bandwidth_mhz` | 3 dB bandwidth (MHz) |
+| `snr_db` | Electrical SNR (dB) |
+| `ber_ook` | OOK BER; AWGN unless `--sigma-r2` given |
+| `capture_rate` | n\_captured / n\_launched |
+| `mean_n_scatters` | Mean real collisions per captured photon |
+| `std_n_scatters` | Std of scattering count |
+| `mean_excess_path_m` | Mean extra path beyond straight-line (m) |
+| `std_excess_path_m` | Std of excess path (m) |
+| `mean_r_m` | Mean radial offset at receiver plane (m) |
+| `n_launched`, `n_captured`, `cir_quality` | Photon counts and quality label |
+
+The `.npz` file stores per-run arrays (`t_axis_ns_0`, `cir_0`, `freqs_mhz_0`,
+`fr_0`, `label_0`, …) keyed by run index, readable with `np.load`.
+
+---
+
+### `main.py` — simulation only (no figures)
+
+Runs photon transport, computes metrics, prints console summary tables, and
+accumulates photon data into Parquet. No figures are generated.
 
 | Command | Description |
 |---|---|
-| `python main.py all` | Full pipeline: both simulations, metrics, plots, Parquet |
-| `python main.py homogeneous` | Homogeneous simulation only |
-| `python main.py inhomogeneous` | Woodcock (stratified) simulation only |
-| `python main.py plots` | Regenerate all figures from saved Parquet (no re-simulation) |
-| `--out PATH` | Output directory (default: `./outputs`) |
+| `python main.py all` | Both homogeneous and inhomogeneous simulations |
+| `python main.py homogeneous` | Homogeneous simulation (Clear / Coastal water, two beams) |
+| `python main.py inhomogeneous` | Inhomogeneous simulation (Woodcock delta-tracking) |
+| `--out PATH` | Output directory (default: `./outputs`); Parquet is appended on every run |
 
 ### `plot.py` — standalone figure regeneration
 
@@ -136,8 +181,9 @@ uowc/
 │                  Parquet accumulation and merge utilities
 ├── plotting/      Matplotlib figure generation for all channel metrics
 ├── reporting.py   Console summary tables
-main.py            CLI entry point (simulation + plots mode)
-plot.py            Standalone figure regeneration from Parquet (no simulation required)
+main.py            Simulation entry point — compute, summarise, accumulate Parquet (no figures)
+metrics.py         Export scalar metrics to CSV and CIR arrays to .npz (no simulation, no figures)
+plot.py            Figure generation from accumulated Parquet (no simulation required)
 notebook.py        Interactive Marimo diagnostics notebook
 ```
 
