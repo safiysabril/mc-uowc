@@ -69,7 +69,11 @@ from uowc.analysis import (
     to_dataframe,
     to_parquet,
     capture_statistics_with_launched,
+    reconstruct_sweep_results,
+    launched_map_from_df,
+    c_ref_map_from_df,
 )
+import pandas as pd
 
 from uowc.analysis.plots import plot_all_diagnostics
 
@@ -106,7 +110,14 @@ def run_homogeneous(out_dir: str):
         save_dir=out_dir,
     )
 
-    df_hom = to_dataframe(raw_hom)
+    c_ref_hom = {
+        RunKey(water.name, beam.name, float(Z)): water.c
+        for water in ALL_WATERS
+        for beam in ALL_BEAMS
+        for Z in SIM.link_ranges_m
+    }
+
+    df_hom = to_dataframe(raw_hom, c_ref_map=c_ref_hom)
 
     parquet_path = os.path.join(
         out_dir,
@@ -115,10 +126,7 @@ def run_homogeneous(out_dir: str):
 
     to_parquet(df_hom, parquet_path)
 
-    launched_hom = {
-        k: v.n_launched
-        for k, v in raw_hom.items()
-    }
+    launched_hom = launched_map_from_df(df_hom)
 
     stats_hom = capture_statistics_with_launched(
         df_hom,
@@ -190,7 +198,14 @@ def run_inhomogeneous(out_dir: str):
         save_dir=out_dir,
     )
 
-    df_inh = to_dataframe(raw_inh)
+    c_ref_inh = {
+        RunKey(medium.name, beam.name, float(Z)): medium.c_max
+        for medium in ALL_INHOMOGENEOUS_MEDIA
+        for beam in ALL_BEAMS
+        for Z in SIM.link_ranges_m
+    }
+
+    df_inh = to_dataframe(raw_inh, c_ref_map=c_ref_inh)
 
     parquet_path = os.path.join(
         out_dir,
@@ -199,10 +214,7 @@ def run_inhomogeneous(out_dir: str):
 
     to_parquet(df_inh, parquet_path)
 
-    launched_inh = {
-        k: v.n_launched
-        for k, v in raw_inh.items()
-    }
+    launched_inh = launched_map_from_df(df_inh)
 
     stats_inh = capture_statistics_with_launched(
         df_inh,
@@ -228,6 +240,76 @@ def run_inhomogeneous(out_dir: str):
 
 
 # ============================================================================
+# PLOTS-ONLY PIPELINE  (no simulation — load from saved Parquet)
+# ============================================================================
+
+def plot_from_parquet(out_dir: str) -> None:
+    """
+    Regenerate all figures from previously saved Parquet files.
+
+    Looks for:
+      {out_dir}/photons_homogeneous.parquet
+      {out_dir}/photons_inhomogeneous.parquet
+
+    At least one must exist.  For each file found, reconstructs the
+    RunResult dicts, recomputes channel metrics, and calls the same
+    plotting functions used in the full simulation pipeline.
+    """
+    hom_path = os.path.join(out_dir, "photons_homogeneous.parquet")
+    inh_path = os.path.join(out_dir, "photons_inhomogeneous.parquet")
+    diag_dir = os.path.join(out_dir, "diagnostics")
+
+    if not os.path.exists(hom_path) and not os.path.exists(inh_path):
+        raise FileNotFoundError(
+            f"No Parquet files found in {out_dir!r}. "
+            "Run the simulation first with 'homogeneous', 'inhomogeneous', or 'all'."
+        )
+
+    if os.path.exists(hom_path):
+        print(f"Loading {hom_path} ...", flush=True)
+        df_hom  = pd.read_parquet(hom_path)
+        raw_hom = reconstruct_sweep_results(df_hom)
+        c_map   = c_ref_map_from_df(df_hom)
+
+        metrics_hom = {
+            key: compute_all_metrics(result, SIM, c_map.get(key, 1.0), key.link_range)
+            for key, result in raw_hom.items()
+        }
+
+        print_summary_tables(metrics_hom, SIM)
+        plot_all(metrics_hom, SIM, save_dir=out_dir)
+
+        stats_hom = capture_statistics_with_launched(df_hom, launched_map_from_df(df_hom))
+        plot_all_diagnostics(
+            df_hom, stats_hom, diag_dir,
+            aperture_radius_m=RECEIVER.aperture_radius_m,
+        )
+        print("Homogeneous figures done.", flush=True)
+
+    if os.path.exists(inh_path):
+        print(f"Loading {inh_path} ...", flush=True)
+        df_inh  = pd.read_parquet(inh_path)
+        raw_inh = reconstruct_sweep_results(df_inh)
+        c_map   = c_ref_map_from_df(df_inh)
+
+        metrics_inh = {
+            key: compute_all_metrics(result, SIM, c_map.get(key, 1.0), key.link_range)
+            for key, result in raw_inh.items()
+        }
+
+        print_inhomogeneous_summary(metrics_inh, SIM, ALL_INHOMOGENEOUS_MEDIA)
+        plot_all_inhomogeneous(metrics_inh, SIM, ALL_INHOMOGENEOUS_MEDIA, save_dir=out_dir)
+
+        stats_inh = capture_statistics_with_launched(df_inh, launched_map_from_df(df_inh))
+        plot_all_diagnostics(
+            df_inh, stats_inh, diag_dir,
+            medium_name=ALL_INHOMOGENEOUS_MEDIA[0].name,
+            aperture_radius_m=RECEIVER.aperture_radius_m,
+        )
+        print("Inhomogeneous figures done.", flush=True)
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -242,8 +324,12 @@ def main():
             "all",
             "homogeneous",
             "inhomogeneous",
+            "plots",
         ],
-        help="Which pipeline to run",
+        help=(
+            "Which pipeline to run. "
+            "'plots' regenerates all figures from saved Parquet without re-simulating."
+        ),
     )
 
     parser.add_argument(
@@ -269,6 +355,9 @@ def main():
 
     elif args.mode == "inhomogeneous":
         run_inhomogeneous(out_dir)
+
+    elif args.mode == "plots":
+        plot_from_parquet(out_dir)
 
     elapsed = time.perf_counter() - t0
 

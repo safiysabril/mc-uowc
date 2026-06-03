@@ -95,6 +95,9 @@ SCHEMA: Dict[str, str] = {
     "n_scatters":    "int32",
     "n_nulls":       "int32",
     "excess_path_m": "float32",
+    # run-level metadata stored per photon row for self-contained Parquet
+    "n_launched":    "int64",   # total photons launched — power normalisation denominator
+    "c_ref":         "float32", # beam-attenuation coefficient used for Beer-Lambert reference
 }
 
 
@@ -106,6 +109,7 @@ def to_dataframe(
     sweep_results: Dict[RunKey, RunResult],
     *,
     run_id_map: Optional[Dict[RunKey, int]] = None,
+    c_ref_map:  Optional[Dict[RunKey, float]] = None,
 ) -> pd.DataFrame:
     """
     Convert an entire sweep result dict into a single Pandas DataFrame.
@@ -119,6 +123,10 @@ def to_dataframe(
     sweep_results : Dict[RunKey, RunResult] from any run_sweep* function
     run_id_map    : optional explicit mapping of RunKey → int run_id.
                     If None, run_id is assigned by enumeration order.
+    c_ref_map     : optional {RunKey: c} mapping of beam-attenuation coefficients.
+                    Stored in the ``c_ref`` column so Parquet is self-contained for
+                    figure regeneration.  Pass ``{RunKey(...): water.c}`` for
+                    homogeneous runs, or ``medium.c_max`` for inhomogeneous.
 
     Returns
     -------
@@ -135,13 +143,14 @@ def to_dataframe(
 
         run_id = run_id_map[key] if run_id_map else run_idx
         r_m    = np.hypot(rec["x_m"], rec["y_m"])
+        c_ref  = float(c_ref_map[key]) if (c_ref_map and key in c_ref_map) else float("nan")
 
         chunk = pd.DataFrame({
             "photon_id":     np.arange(photon_cursor, photon_cursor + n, dtype=np.int64),
-            "run_id":        np.full(n, run_id,           dtype=np.int32),
+            "run_id":        np.full(n, run_id,               dtype=np.int32),
             "medium_name":   pd.Categorical([key.water_name] * n),
             "beam_name":     pd.Categorical([key.beam_name]  * n),
-            "link_range_m":  np.full(n, key.link_range,    dtype=np.float32),
+            "link_range_m":  np.full(n, key.link_range,       dtype=np.float32),
             "weight":        rec["weight"].astype(np.float64),
             "tof_s":         rec["tof_s"].astype(np.float64),
             "tof_ns":        (rec["tof_s"] * 1e9).astype(np.float64),
@@ -152,6 +161,8 @@ def to_dataframe(
             "n_scatters":    rec["n_scatters"],
             "n_nulls":       rec["n_nulls"],
             "excess_path_m": (rec["path_length_m"] - key.link_range).astype(np.float32),
+            "n_launched":    np.full(n, result.n_launched,    dtype=np.int64),
+            "c_ref":         np.full(n, c_ref,                dtype=np.float32),
         })
         frames.append(chunk)
         photon_cursor += n
@@ -174,6 +185,8 @@ def write_parquet_partition(
     *,
     run_id: int = 0,
     photon_id_offset: int = 0,
+    c_ref: float = float("nan"),
+    **kwargs,
 ) -> Path:
     """
     Write one (medium, beam, range) result as a Parquet partition file.
@@ -209,10 +222,10 @@ def write_parquet_partition(
         df  = pd.DataFrame({
             "photon_id":     np.arange(photon_id_offset,
                                        photon_id_offset + n, dtype=np.int64),
-            "run_id":        np.full(n, run_id,           dtype=np.int32),
+            "run_id":        np.full(n, run_id,               dtype=np.int32),
             "medium_name":   pd.Categorical([key.water_name] * n),
             "beam_name":     pd.Categorical([key.beam_name]  * n),
-            "link_range_m":  np.full(n, key.link_range,    dtype=np.float32),
+            "link_range_m":  np.full(n, key.link_range,       dtype=np.float32),
             "weight":        rec["weight"].astype(np.float64),
             "tof_s":         rec["tof_s"].astype(np.float64),
             "tof_ns":        (rec["tof_s"] * 1e9).astype(np.float64),
@@ -223,6 +236,8 @@ def write_parquet_partition(
             "n_scatters":    rec["n_scatters"],
             "n_nulls":       rec["n_nulls"],
             "excess_path_m": (rec["path_length_m"] - key.link_range).astype(np.float32),
+            "n_launched":    np.full(n, result.n_launched,    dtype=np.int64),
+            "c_ref":         np.full(n, c_ref,                dtype=np.float32),
         })
         df = df.astype({k: v for k, v in SCHEMA.items() if k in df.columns})
 
@@ -254,6 +269,141 @@ def read_parquet_dataset(out_dir: str | Path) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].astype("category")
     return df
+
+
+def reconstruct_sweep_results(df: pd.DataFrame) -> Dict:
+    """
+    Rebuild a ``{RunKey: RunResult}`` dict from a Parquet-loaded DataFrame.
+
+    Requires the ``n_launched`` column (present in files written after the
+    schema update).  Use this to regenerate figures from saved Parquet without
+    re-running the simulation.
+
+    Example
+    -------
+    >>> df   = pd.read_parquet("outputs/photons_homogeneous.parquet")
+    >>> raw  = reconstruct_sweep_results(df)
+    >>> metrics = {k: compute_all_metrics(v, SIM, ...) for k, v in raw.items()}
+    """
+    from uowc.simulation import RunKey, RunResult  # local to avoid circular import
+
+    results: Dict = {}
+    for (medium, beam, Z), grp in df.groupby(
+        ["medium_name", "beam_name", "link_range_m"], observed=True
+    ):
+        n_launched = int(grp["n_launched"].iloc[0]) if "n_launched" in grp.columns else 0
+        rec = {
+            "weight":        grp["weight"].to_numpy(dtype=np.float64),
+            "tof_s":         grp["tof_s"].to_numpy(dtype=np.float64),
+            "x_m":           grp["x_m"].to_numpy(dtype=np.float32),
+            "y_m":           grp["y_m"].to_numpy(dtype=np.float32),
+            "path_length_m": grp["path_length_m"].to_numpy(dtype=np.float32),
+            "n_scatters":    grp["n_scatters"].to_numpy(dtype=np.int32),
+            "n_nulls":       grp["n_nulls"].to_numpy(dtype=np.int32),
+        }
+        key = RunKey(str(medium), str(beam), float(Z))
+        results[key] = RunResult(rec, n_launched)
+    return results
+
+
+def launched_map_from_df(df: pd.DataFrame) -> Dict:
+    """
+    Extract ``{RunKey: n_launched}`` from a Parquet DataFrame.
+
+    Replaces the manual ``{k: v.n_launched for k, v in raw.items()}`` that
+    requires the original RunResult dict to be in memory.
+    """
+    from uowc.simulation import RunKey
+
+    out: Dict = {}
+    for (medium, beam, Z), grp in df.groupby(
+        ["medium_name", "beam_name", "link_range_m"], observed=True
+    ):
+        out[RunKey(str(medium), str(beam), float(Z))] = int(grp["n_launched"].iloc[0])
+    return out
+
+
+def c_ref_map_from_df(df: pd.DataFrame) -> Dict:
+    """
+    Extract ``{RunKey: c_ref}`` from a Parquet DataFrame.
+
+    Use as the ``c`` argument to ``compute_all_metrics`` when regenerating
+    metrics from Parquet.
+    """
+    from uowc.simulation import RunKey
+
+    out: Dict = {}
+    for (medium, beam, Z), grp in df.groupby(
+        ["medium_name", "beam_name", "link_range_m"], observed=True
+    ):
+        out[RunKey(str(medium), str(beam), float(Z))] = float(grp["c_ref"].iloc[0])
+    return out
+
+
+def merge_parquet_files(
+    paths: Sequence[str | Path],
+    output_path: str | Path,
+) -> pd.DataFrame:
+    """
+    Merge multiple simulation Parquet files into one, accumulating photons.
+
+    Running the simulation multiple times and merging the outputs is an
+    effective way to build up enough captured photons for sparse runs
+    (long range, turbid water) without hitting the per-run memory cap.
+
+    ``n_launched`` is **summed** across input files for each
+    (medium, beam, range) group so power normalisation stays correct in
+    the merged file.  All photon rows are concatenated as-is.
+
+    Parameters
+    ----------
+    paths       : list of Parquet file paths to merge
+    output_path : where to write the merged file
+
+    Returns
+    -------
+    The merged DataFrame (also written to output_path).
+    """
+    from uowc.simulation import RunKey  # local import to avoid circular
+
+    launched_per_file: List[Dict] = []
+    frames: List[pd.DataFrame]  = []
+
+    for path in paths:
+        df = pd.read_parquet(path)
+        launched: Dict = {}
+        for (medium, beam, Z), grp in df.groupby(
+            ["medium_name", "beam_name", "link_range_m"], observed=True
+        ):
+            key = RunKey(str(medium), str(beam), float(Z))
+            launched[key] = int(grp["n_launched"].iloc[0])
+        launched_per_file.append(launched)
+        frames.append(df)
+
+    # Sum n_launched across files per group
+    launched_total: Dict = {}
+    for launched in launched_per_file:
+        for key, n in launched.items():
+            launched_total[key] = launched_total.get(key, 0) + n
+
+    # Concatenate all photon rows
+    merged = pd.concat(frames, ignore_index=True)
+
+    # Update n_launched in merged DataFrame to the cumulative total
+    for (medium, beam, Z), idx in merged.groupby(
+        ["medium_name", "beam_name", "link_range_m"], observed=True
+    ).groups.items():
+        key = RunKey(str(medium), str(beam), float(Z))
+        if key in launched_total:
+            merged.loc[idx, "n_launched"] = launched_total[key]
+
+    # Re-apply category dtypes (sometimes lost on concat)
+    for col in ("medium_name", "beam_name"):
+        if col in merged.columns:
+            merged[col] = merged[col].astype("category")
+
+    to_parquet(merged, output_path)
+    return merged
 
 
 def to_parquet(df: pd.DataFrame, path: str | Path) -> None:

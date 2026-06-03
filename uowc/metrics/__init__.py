@@ -23,25 +23,32 @@ def received_power_dB(weights: ndarray, n_launched: int) -> float:
 
 def compute_cir(weights, times, dt, n_bins, *, min_photons_per_bin: int = 5):
     """
-    Build a normalised CIR histogram.
+    Build a normalised CIR histogram of excess delay.
 
-    Bin count adapts when captured photons are too few for the requested
-    resolution: n_bins is reduced until each bin holds ≥ min_photons_per_bin
-    photons on average.  dt is stretched to cover the actual arrival-time
-    span so no photons are clipped.  The fixed window is used when times is
-    empty (fallback).
+    tof_s stored in PhotonRecord is the *absolute* time of flight
+    (path_length / C_medium).  For a 25 m link the ballistic arrival is
+    ~111 ns — well outside a fixed 30 ns window.  Subtracting the first
+    arrival time converts to excess delay so the CIR always starts at 0
+    regardless of link range.
+
+    Bin count also adapts when captured photons are too few for the
+    requested resolution: n_bins is reduced so each bin holds ≥
+    min_photons_per_bin photons on average.
 
     delay_spread and received_power are computed from raw (weights, times)
     pairs in their own functions and are NOT affected by this binning.
     """
     if times.size == 0:
-        edges = np.linspace(0.0, dt * n_bins, n_bins + 1)
+        edges  = np.linspace(0.0, dt * n_bins, n_bins + 1)
         h, _   = np.histogram(times, bins=edges, weights=weights)
         t_axis = 0.5 * (edges[:-1] + edges[1:])
         return t_axis, h / (h.sum() + 1e-30)
 
-    t_span = float(times.max()) * 1.05          # 5% tail padding
-    t_span = max(t_span, dt * 10)               # at least 10 bins wide
+    # Convert absolute TOF → excess delay (ballistic photon defines t = 0)
+    excess = times - times.min()
+
+    t_span = float(excess.max()) * 1.05   # 5% tail padding
+    t_span = max(t_span, dt * 10)         # at least 10 bins wide
 
     # Statistics limit: enough photons per bin
     n_stat = max(times.size // max(min_photons_per_bin, 1), 10)
@@ -49,10 +56,9 @@ def compute_cir(weights, times, dt, n_bins, *, min_photons_per_bin: int = 5):
     n_phys = max(int(np.ceil(t_span / dt)), 10)
     # Use whichever is tighter, capped at the requested maximum
     n_use  = min(n_stat, n_phys, n_bins)
-    dt_use = t_span / n_use
 
     edges  = np.linspace(0.0, t_span, n_use + 1)
-    h, _   = np.histogram(times, bins=edges, weights=weights)
+    h, _   = np.histogram(excess, bins=edges, weights=weights)
     t_axis = 0.5 * (edges[:-1] + edges[1:])
     return t_axis, h / (h.sum() + 1e-30)
 
@@ -60,9 +66,12 @@ def compute_cir(weights, times, dt, n_bins, *, min_photons_per_bin: int = 5):
 def rms_delay_spread(weights, times) -> float:
     if weights.size < 2 or weights.sum() == 0:
         return float("nan")
-    w_sum = weights.sum()
-    tau_m = (weights * times).sum() / w_sum
-    return float(np.sqrt((weights * (times - tau_m) ** 2).sum() / w_sum))
+    # Use excess delay (subtract first arrival) so the result is independent
+    # of link range and represents only the multipath spread.
+    excess = times - times.min()
+    w_sum  = weights.sum()
+    tau_m  = (weights * excess).sum() / w_sum
+    return float(np.sqrt((weights * (excess - tau_m) ** 2).sum() / w_sum))
 
 
 def frequency_response(h_norm, dt, pad_factor=8):
