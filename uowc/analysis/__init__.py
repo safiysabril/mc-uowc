@@ -413,6 +413,59 @@ def to_parquet(df: pd.DataFrame, path: str | Path) -> None:
     _log.info("Saved Parquet → %s  (%.1f MB)", path, os.path.getsize(path) / 1e6)
 
 
+def append_to_parquet(df: pd.DataFrame, path: str | Path) -> None:
+    """
+    Accumulate photons into a Parquet file across simulation runs.
+
+    If the file does not yet exist, writes ``df`` directly (same as
+    to_parquet).  If it already exists, merges the existing data with
+    ``df`` using merge_parquet_files logic — photon rows are
+    concatenated and ``n_launched`` is summed per (medium, beam, range)
+    group so power normalisation stays correct.
+
+    Use this instead of to_parquet in main.py so that successive runs
+    accumulate photons in a single file rather than overwriting it.
+    This is especially useful for turbid water / long range where a
+    single run captures too few photons for a clean CIR histogram.
+    """
+    path = Path(path)
+    if not path.exists():
+        to_parquet(df, path)
+        return
+
+    # Merge existing file with new data
+    existing = pd.read_parquet(path)
+
+    from uowc.simulation import RunKey  # local import to avoid circular
+
+    # Sum n_launched per group across both DataFrames
+    launched_total: Dict = {}
+    for frame in (existing, df):
+        for (medium, beam, Z), grp in frame.groupby(
+            ["medium_name", "beam_name", "link_range_m"], observed=True
+        ):
+            key = RunKey(str(medium), str(beam), float(Z))
+            launched_total[key] = launched_total.get(key, 0) + int(grp["n_launched"].iloc[0])
+
+    merged = pd.concat([existing, df], ignore_index=True)
+
+    for (medium, beam, Z), idx in merged.groupby(
+        ["medium_name", "beam_name", "link_range_m"], observed=True
+    ).groups.items():
+        key = RunKey(str(medium), str(beam), float(Z))
+        if key in launched_total:
+            merged.loc[idx, "n_launched"] = launched_total[key]
+
+    for col in ("medium_name", "beam_name"):
+        if col in merged.columns:
+            merged[col] = merged[col].astype("category")
+
+    to_parquet(merged, path)
+    n_prev = len(existing)
+    n_new  = len(df)
+    _log.info("Appended %d rows to existing %d rows → %d total", n_new, n_prev, len(merged))
+
+
 def to_csv(df: pd.DataFrame, path: str | Path) -> None:
     """Write DataFrame to CSV (for human inspection of small subsets)."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)

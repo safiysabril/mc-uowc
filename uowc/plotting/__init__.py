@@ -125,6 +125,44 @@ def _semilogy_finite(ax, x, y, **kw) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Photon-count quality helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Thresholds for CIR/frequency-response reliability
+_CIR_THRESHOLDS = [
+    (2_000, "good",      None),
+    (250,   "sparse",    "orange"),
+    (50,    "very sparse","red"),
+    (0,     "too few",   "red"),
+]
+
+
+def _cir_quality(n_captured: int):
+    """Return (label, colour) for a photon count."""
+    for threshold, label, colour in _CIR_THRESHOLDS:
+        if n_captured >= threshold:
+            return label, colour
+    return "too few", "red"
+
+
+def _annotate_photon_count(ax, n_captured: int) -> None:
+    """Add a photon-count badge in the top-right corner of a CIR/FR subplot."""
+    label, colour = _cir_quality(n_captured)
+    text  = f"n={n_captured:,}\n({label})"
+    props = dict(boxstyle="round,pad=0.3", facecolor="white",
+                 edgecolor=colour or "grey", alpha=0.85)
+    ax.text(
+        0.97, 0.97, text,
+        transform=ax.transAxes,
+        fontsize=6.5,
+        verticalalignment="top",
+        horizontalalignment="right",
+        bbox=props,
+        color=colour or "black",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Shared grid renderers  (used by both homogeneous and inhomogeneous families)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -154,6 +192,7 @@ def _render_cir_grid(
                 _style_ax(ax, "Time (ns)", "Norm. amplitude",
                           f"{entity_name}\n{beam.name} — {Z} m")
                 ax.set_xlim([0, t_ns[-1]])
+                _annotate_photon_count(ax, m.get("n_captured", 0))
                 col += 1
 
 
@@ -197,6 +236,7 @@ def _render_fr_grid(
                 ax.set_xlim([0, x_max])
                 ax.set_ylim([0, 1.1])
                 ax.legend(fontsize=7)
+                _annotate_photon_count(ax, m.get("n_captured", 0))
                 col += 1
 
 

@@ -47,16 +47,19 @@ pip install -e .
 
 ```bash
 # Run the full pipeline — homogeneous + inhomogeneous, metrics, plots, Parquet export
-python -m uowc.main all
+python main.py all
 
 # Homogeneous simulation only (Clear Water / Coastal Water, two beams, five ranges)
-python -m uowc.main homogeneous
+python main.py homogeneous
 
 # Inhomogeneous simulation only (Woodcock delta-tracking, three stratified profiles)
-python -m uowc.main inhomogeneous
+python main.py inhomogeneous
+
+# Regenerate all figures from previously saved Parquet data (no re-simulation)
+python main.py plots
 
 # Write outputs to a custom directory
-python -m uowc.main all --out ./results
+python main.py all --out ./results
 ```
 
 ### Running from Python
@@ -82,12 +85,35 @@ print(f"3 dB bandwidth  : {metrics['bandwidth_hz']/1e6:.1f} MHz")
 
 ## CLI reference
 
+### `main.py` — simulation + plotting
+
 | Command | Description |
 |---|---|
-| `python -m uowc.main all` | Full pipeline: both simulations, metrics, plots, Parquet |
-| `python -m uowc.main homogeneous` | Homogeneous simulation only |
-| `python -m uowc.main inhomogeneous` | Woodcock (stratified) simulation only |
+| `python main.py all` | Full pipeline: both simulations, metrics, plots, Parquet |
+| `python main.py homogeneous` | Homogeneous simulation only |
+| `python main.py inhomogeneous` | Woodcock (stratified) simulation only |
+| `python main.py plots` | Regenerate all figures from saved Parquet (no re-simulation) |
 | `--out PATH` | Output directory (default: `./outputs`) |
+
+### `plot.py` — standalone figure regeneration
+
+```bash
+# Regenerate from the default output directory
+python plot.py
+
+# Specify a different directory
+python plot.py --out ./results
+
+# Point at a specific Parquet file
+python plot.py --hom outputs/photons_homogeneous.parquet
+python plot.py --inh outputs/photons_inhomogeneous.parquet
+
+# Merge multiple files first, then plot (see Accumulating photons section)
+python plot.py --merge run1/photons_homogeneous.parquet \
+                       run2/photons_homogeneous.parquet \
+               --merge-out merged/photons_homogeneous.parquet \
+               --out merged
+```
 
 ---
 
@@ -106,10 +132,12 @@ uowc/
 │                  convergence framework (batch-means relative standard error)
 ├── metrics/       Derived channel metrics from RunResult: power, CIR, delay spread,
 │                  frequency response, bandwidth, OOK BER, coherence time
-├── analysis/      Pandas DataFrame pipeline, Parquet/CSV export, capture statistics
+├── analysis/      Pandas DataFrame pipeline, Parquet/CSV export, capture statistics,
+│                  Parquet accumulation and merge utilities
 ├── plotting/      Matplotlib figure generation for all channel metrics
 ├── reporting.py   Console summary tables
-main.py            CLI entry point
+main.py            CLI entry point (simulation + plots mode)
+plot.py            Standalone figure regeneration from Parquet (no simulation required)
 notebook.py        Interactive Marimo diagnostics notebook
 ```
 
@@ -265,13 +293,63 @@ Exact two-polarisation Fresnel equations are applied when photons reach the rece
 |---|---|---|
 | `photon_id` | int64 | Global unique ID across the sweep |
 | `weight` | float64 | Final photon weight after absorption |
-| `tof_s` / `tof_ns` | float64 | Time of flight in seconds / nanoseconds |
+| `tof_s` / `tof_ns` | float64 | Absolute time of flight in seconds / nanoseconds |
 | `x_m`, `y_m`, `r_m` | float32 | Position at capture plane |
 | `path_length_m` | float32 | Total geometric path length |
 | `n_scatters` | int32 | Real scattering events |
 | `n_nulls` | int32 | Null (Woodcock virtual) collisions |
 | `excess_path_m` | float32 | Extra path beyond straight-line distance |
+| `n_launched` | int64 | Total photons launched for this run — power normalisation denominator |
+| `c_ref` | float32 | Beam-attenuation coefficient used for Beer-Lambert reference power |
 | `medium_name`, `beam_name`, `link_range_m` | category / float | Run metadata |
+
+`tof_s` is the **absolute** time of flight (`path_length / C_medium`). For a 25 m link this is ~111 ns. When computing the CIR, the code automatically converts to **excess delay** (subtracting the first-arrival time) so histograms always start at 0 regardless of link range.
+
+The `n_launched` and `c_ref` columns make the Parquet file fully self-contained: figures can be regenerated without the original simulation objects.
+
+---
+
+## Accumulating photons for sparse runs
+
+At long link range in turbid water a single run may capture too few photons for a clean CIR or reliable frequency response. The pipeline handles this with **automatic accumulation**: every time `main.py` is run with the same `--out` directory, new photons are **merged into** the existing Parquet file rather than overwriting it. `n_launched` is summed correctly per run so power normalisation stays exact.
+
+```bash
+# Each run adds to the same file — run as many times as needed
+python main.py homogeneous --out ./outputs
+python main.py homogeneous --out ./outputs
+python main.py homogeneous --out ./outputs
+
+# Then regenerate figures from the accumulated data
+python main.py plots --out ./outputs
+```
+
+To start fresh, delete the Parquet file before running:
+
+```bash
+rm ./outputs/photons_homogeneous.parquet
+python main.py homogeneous --out ./outputs
+```
+
+You can also merge Parquet files from different directories using `plot.py`:
+
+```bash
+python plot.py --merge run1/photons_homogeneous.parquet \
+                       run2/photons_homogeneous.parquet \
+                       run3/photons_homogeneous.parquet \
+               --merge-out merged/photons_homogeneous.parquet \
+               --out merged
+```
+
+### CIR photon quality thresholds
+
+Both `main.py plots` and `plot.py` print a per-run photon count table before drawing figures, and each CIR / frequency-response subplot shows a badge indicating data quality:
+
+| Captured photons | Quality | Action |
+|---|---|---|
+| ≥ 2 000 | good | None |
+| 250 – 1 999 | sparse | CIR shape usable; bandwidth approximate |
+| 50 – 249 | very sparse | Run 2–3 more times and accumulate |
+| < 50 | TOO FEW | CIR is noise — accumulate more runs |
 
 ---
 

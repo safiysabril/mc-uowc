@@ -68,12 +68,28 @@ from uowc.plotting import (
 from uowc.analysis import (
     to_dataframe,
     to_parquet,
+    append_to_parquet,
     capture_statistics_with_launched,
     reconstruct_sweep_results,
     launched_map_from_df,
     c_ref_map_from_df,
 )
 import pandas as pd
+
+_CIR_THRESHOLDS = [(2_000, "good"), (250, "sparse"), (50, "very sparse"), (0, "TOO FEW")]
+
+
+def _photon_count_table(df: pd.DataFrame) -> None:
+    print(f"\n{'Medium':<28} {'Beam':<24} {'Range':>7}  {'Captured':>10}  Status")
+    print("-" * 82)
+    for (medium, beam, Z), grp in df.groupby(
+        ["medium_name", "beam_name", "link_range_m"], observed=True
+    ):
+        n = len(grp)
+        status = next(label for thr, label in _CIR_THRESHOLDS if n >= thr)
+        flag   = " <-- run more" if n < 250 else ""
+        print(f"{str(medium):<28} {str(beam):<24} {Z:>7.1f}  {n:>10,}  {status}{flag}")
+    print()
 
 from uowc.analysis.plots import plot_all_diagnostics
 
@@ -124,7 +140,7 @@ def run_homogeneous(out_dir: str):
         "photons_homogeneous.parquet",
     )
 
-    to_parquet(df_hom, parquet_path)
+    append_to_parquet(df_hom, parquet_path)
 
     launched_hom = launched_map_from_df(df_hom)
 
@@ -212,7 +228,7 @@ def run_inhomogeneous(out_dir: str):
         "photons_inhomogeneous.parquet",
     )
 
-    to_parquet(df_inh, parquet_path)
+    append_to_parquet(df_inh, parquet_path)
 
     launched_inh = launched_map_from_df(df_inh)
 
@@ -268,6 +284,7 @@ def plot_from_parquet(out_dir: str) -> None:
     if os.path.exists(hom_path):
         print(f"Loading {hom_path} ...", flush=True)
         df_hom  = pd.read_parquet(hom_path)
+        _photon_count_table(df_hom)
         raw_hom = reconstruct_sweep_results(df_hom)
         c_map   = c_ref_map_from_df(df_hom)
 
@@ -289,6 +306,7 @@ def plot_from_parquet(out_dir: str) -> None:
     if os.path.exists(inh_path):
         print(f"Loading {inh_path} ...", flush=True)
         df_inh  = pd.read_parquet(inh_path)
+        _photon_count_table(df_inh)
         raw_inh = reconstruct_sweep_results(df_inh)
         c_map   = c_ref_map_from_df(df_inh)
 

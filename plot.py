@@ -53,7 +53,7 @@ import time
 
 import pandas as pd
 
-from uowc.config import SIM, RECEIVER, ALL_INHOMOGENEOUS_MEDIA
+from uowc.config import SIM, RECEIVER
 from uowc.medium import ALL_INHOMOGENEOUS_MEDIA
 from uowc.metrics import compute_all_metrics
 from uowc.plotting import plot_all, plot_all_inhomogeneous
@@ -72,8 +72,26 @@ from uowc.analysis.plots import plot_all_diagnostics
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+_CIR_THRESHOLDS = [(2_000, "good"), (250, "sparse"), (50, "very sparse"), (0, "TOO FEW")]
+
+
+def _photon_count_table(df: pd.DataFrame) -> None:
+    """Print a per-run photon count table with quality indicators."""
+    print(f"\n{'Medium':<28} {'Beam':<24} {'Range':>7}  {'Captured':>10}  Status")
+    print("-" * 82)
+    for (medium, beam, Z), grp in df.groupby(
+        ["medium_name", "beam_name", "link_range_m"], observed=True
+    ):
+        n = len(grp)
+        status = next(label for thr, label in _CIR_THRESHOLDS if n >= thr)
+        flag   = " <-- run more" if n < 250 else ""
+        print(f"{str(medium):<28} {str(beam):<24} {Z:>7.1f}  {n:>10,}  {status}{flag}")
+    print()
+
+
 def _plot_one(df: pd.DataFrame, out_dir: str, medium_type: str) -> None:
     """Reconstruct metrics from ``df`` and write all figures to ``out_dir``."""
+    _photon_count_table(df)
     raw   = reconstruct_sweep_results(df)
     c_map = c_ref_map_from_df(df)
 
