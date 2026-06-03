@@ -60,7 +60,8 @@ import time
 import pandas as pd
 
 from uowc.config import SIM, RECEIVER
-from uowc.medium import ALL_INHOMOGENEOUS_MEDIA
+# Must match the media simulated by main.py — the turbulence-coupled profiles.
+from uowc.turbulence import ALL_COUPLED_MEDIA as ALL_INHOMOGENEOUS_MEDIA
 from uowc.metrics import compute_all_metrics
 from uowc.plotting import plot_all, plot_all_inhomogeneous
 from uowc.reporting import print_summary_tables, print_inhomogeneous_summary

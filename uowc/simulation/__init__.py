@@ -32,8 +32,37 @@ from uowc.config import (
     RECEIVER, ALL_WATERS, ALL_BEAMS,
 )
 from uowc.medium import MediumProfile
-from uowc.transport import propagate_batch, propagate_batch_inhomogeneous, PhotonRecord
+from uowc.transport import (
+    propagate_batch,
+    propagate_batch_inhomogeneous,
+    propagate_batch_inhomogeneous_turbulent,
+    PhotonRecord,
+)
+from uowc.turbulence import NoTurbulence, TurbulenceProfile
 from uowc.simulation.convergence import build_monitor
+
+# Null-object turbulence shared by all turbulence-free dispatches.
+_NO_TURB = NoTurbulence()
+
+
+def _turbulence_for(medium) -> TurbulenceProfile:
+    """Turbulence profile carried by a medium, or the null object.
+
+    A :class:`~uowc.turbulence.CoupledOceanMedium` is *both* a MediumProfile
+    and a TurbulenceProfile — its depth layers bundle aligned IOP and
+    turbulence parameters — so it is its own turbulence source.  Plain media
+    (HomogeneousMedium, LayeredMedium, GradientMedium) carry no turbulence and
+    fall back to :data:`_NO_TURB`.
+
+    Detection is by duck typing, not ``isinstance``: CoupledOceanMedium
+    implements the TurbulenceProfile *protocol* (``C_n2`` + ``is_turbulence_free``)
+    without inheriting from it, so an isinstance check would wrongly classify it
+    as turbulence-free.
+    """
+    is_free = getattr(medium, "is_turbulence_free", None)
+    if callable(getattr(medium, "C_n2", None)) and callable(is_free) and not is_free():
+        return medium
+    return _NO_TURB
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,22 +155,38 @@ def _dispatch_inhomogeneous(
     seed: np.random.SeedSequence,
     n_photons: int | None = None,
 ) -> PhotonRecord:
+    """Dispatch a Woodcock (inhomogeneous) batch across the worker pool.
+
+    If the medium carries turbulence (a CoupledOceanMedium with non-zero
+    C_n²), the turbulent worker is used and the medium is passed as its own
+    turbulence profile — phase-screen angular kicks along the path plus
+    scintillation fading at the receiver.  Otherwise the plain Woodcock worker
+    runs (turbulence-free).
+    """
     nw           = cfg.n_workers
     total        = cfg.n_photons if n_photons is None else n_photons
     base, rem    = divmod(total, nw)
     batches      = [base + (1 if i < rem else 0) for i in range(nw)]
     worker_seeds = seed.spawn(nw)
+    turbulence   = _turbulence_for(medium)
 
-    args_list = [
-        (batches[i], worker_seeds[i].generate_state(4, dtype=np.uint64),
-         medium,
-         beam.divergence_rad, beam.waist_m,
-         RECEIVER.aperture_radius_m, RECEIVER.fov_rad,
-         link_range_m, cfg.weight_threshold, cfg.roulette_m, cfg.chunk_size)
-        for i in range(nw)
-    ]
+    common = lambda i: (
+        batches[i], worker_seeds[i].generate_state(4, dtype=np.uint64),
+        medium,
+        beam.divergence_rad, beam.waist_m,
+        RECEIVER.aperture_radius_m, RECEIVER.fov_rad,
+        link_range_m, cfg.weight_threshold, cfg.roulette_m, cfg.chunk_size,
+    )
+
+    if turbulence.is_turbulence_free():
+        worker    = propagate_batch_inhomogeneous
+        args_list = [common(i) for i in range(nw)]
+    else:
+        worker    = propagate_batch_inhomogeneous_turbulent
+        args_list = [common(i) + (turbulence,) for i in range(nw)]
+
     with ProcessPoolExecutor(max_workers=nw) as ex:
-        batch_records = list(ex.map(propagate_batch_inhomogeneous, args_list))
+        batch_records = list(ex.map(worker, args_list))
     return _concat_records(batch_records)
 
 

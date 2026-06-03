@@ -47,7 +47,12 @@ import time
 from dataclasses import replace
 
 from uowc.config import SIM, ALL_WATERS, ALL_BEAMS
-from uowc.medium import ALL_INHOMOGENEOUS_MEDIA
+# The inhomogeneous sweep uses the turbulence-coupled ocean profiles: each
+# CoupledOceanMedium bundles depth-aligned IOP and turbulence (ε, χ_T) layers,
+# so the Woodcock transport runs with phase-screen angular kicks + scintillation
+# fading.  Turbulence is therefore exercised by the inhomogeneous medium only;
+# the homogeneous sweep stays turbulence-free.
+from uowc.turbulence import ALL_COUPLED_MEDIA as ALL_INHOMOGENEOUS_MEDIA
 
 from uowc.reporting import (
     print_run_header,
