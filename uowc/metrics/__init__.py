@@ -64,13 +64,26 @@ def compute_cir(weights, times, dt, n_bins, *, min_photons_per_bin: int = 5):
     return t_axis, h / (h.sum() + 1e-30)
 
 
+def _weighted_quantile(values: ndarray, weights: ndarray, q: float) -> float:
+    """Weighted quantile: smallest value whose cumulative weight fraction ≥ q."""
+    if values.size == 0:
+        return 0.0
+    order = np.argsort(values, kind="mergesort")
+    v     = values[order]
+    cw    = np.cumsum(weights[order])
+    if cw[-1] <= 0.0:
+        return float(v[-1])
+    return float(np.interp(q, cw / cw[-1], v))
+
+
 def compute_cir_kde(
-    weights:  ndarray,
-    times:    ndarray,
+    weights:       ndarray,
+    times:         ndarray,
     *,
-    n_grid:   int   = 512,
-    bw_scale: float = 1.0,
-    min_bw_s: float = 1e-12,
+    n_grid:        int   = 512,
+    bw_scale:      float = 1.0,
+    tail_quantile: float = 0.995,
+    min_bw_s:      float = 1e-12,
 ) -> Tuple[ndarray, ndarray]:
     """
     Smooth channel impulse response h(τ) via a weighted Gaussian kernel
@@ -86,29 +99,44 @@ def compute_cir_kde(
     a smooth, continuous h(τ) — the natural estimator of a continuous impulse
     response — and degrades gracefully as the photon count falls.
 
-    Bandwidth selection
-    -------------------
-    Silverman's rule using the Kish effective sample size
-    N_eff = (Σwᵢ)² / Σwᵢ² for weighted samples:
+    Outlier-robust bandwidth and time window
+    -----------------------------------------
+    A handful of heavily-scattered photons can arrive far later than the bulk
+    of the energy.  If the kernel bandwidth and the plotted time window were
+    driven by the *maximum* delay, those rare outliers would (a) inflate the
+    bandwidth and over-smooth the sharp ballistic peak, and (b) stretch the
+    x-axis so the peak collapses into the left edge — exactly the failure seen
+    for clear water at short range.  Both quantities are therefore made robust:
 
-        b = bw_scale · 1.06 · σ_τ · N_eff^(−1/5)
+      • Bandwidth — Silverman's robust rule of thumb with the Kish effective
+        sample size N_eff = (Σwᵢ)²/Σwᵢ² for weighted data::
 
-    so the smoothing automatically tracks both the spread of the arrivals and
-    the *effective* number of photons (more smoothing when photons are scarce).
+            b = bw_scale · 0.9 · min(σ_τ, IQR/1.349) · N_eff^(−1/5)
+
+        Using ``min(σ, IQR/1.349)`` makes the smoothing track the *core* spread
+        of the arrivals, immune to a few far-tail photons.
+
+      • Time window — the grid runs from 0 to a weighted high-quantile of the
+        delay energy (``tail_quantile``, default 99.5 %) plus a few bandwidths,
+        instead of to the maximum delay.  The window then auto-adapts: tight
+        for a near-ballistic channel (peak clearly visible) and wide for a
+        genuinely dispersive one (full multipath tail shown).  Photons beyond
+        the window — the excluded <0.5 % outliers — are dropped from the
+        estimate so they create no edge artefact.
+
     ``bw_scale`` lets the caller trade smoothness against fidelity.
 
     Implementation (binned KDE)
     ---------------------------
-    The estimate is computed as a fine weighted histogram convolved with a
-    Gaussian — O(N + n_grid) rather than the O(N·n_grid) of a direct kernel
-    sum — so it stays cheap even for millions of captured photons.  The
-    convolution uses ``mode="reflect"`` at τ = 0, which is exactly the
-    reflection boundary correction for a one-sided density: it stops the
-    kernel leaking energy to τ < 0, keeps the leading (ballistic) edge sharp,
-    and conserves energy.
+    The estimate is a fine weighted histogram convolved with a Gaussian —
+    O(N + n_grid) rather than the O(N·n_grid) of a direct kernel sum — so it
+    stays cheap even for millions of captured photons.  The convolution uses
+    ``mode="reflect"`` at τ = 0, the reflection boundary correction for a
+    one-sided density: it stops the kernel leaking energy to τ < 0, keeps the
+    leading (ballistic) edge sharp, and conserves energy.
 
     delay_spread and received_power are computed from the raw (weights, times)
-    in their own functions and are NOT affected by this smoothing.
+    in their own functions and are NOT affected by this smoothing or windowing.
 
     Returns
     -------
@@ -126,21 +154,29 @@ def compute_cir_kde(
     # Kish effective sample size for weighted data
     n_eff = w_sum * w_sum / (float(np.sum(w * w)) + 1e-300)
 
+    # Robust core spread: min(weighted std, weighted IQR / 1.349)
     mean  = float(np.sum(w * excess) / w_sum)
     var   = float(np.sum(w * (excess - mean) ** 2) / w_sum)
     sigma = np.sqrt(max(var, 0.0))
+    iqr   = (_weighted_quantile(excess, w, 0.75)
+             - _weighted_quantile(excess, w, 0.25))
+    spread = min(sigma, iqr / 1.349) if iqr > 0.0 else sigma
 
-    bw = 1.06 * sigma * n_eff ** (-0.2) if sigma > 0.0 else 0.0
+    bw = 0.9 * spread * n_eff ** (-0.2) if spread > 0.0 else 0.0
     bw = max(bw * bw_scale, min_bw_s)
 
-    t_max  = float(excess.max()) + 4.0 * bw
+    # Outlier-robust time window: weighted high-quantile, not the max.
+    t_hi   = _weighted_quantile(excess, w, tail_quantile)
+    t_max  = max(t_hi + 4.0 * bw, 10.0 * bw)
     t_axis = np.linspace(0.0, t_max, n_grid)
     dt_grid = t_axis[1] - t_axis[0]
 
-    # Fine weighted histogram on the grid, then Gaussian-smooth it.
-    idx  = np.clip(np.round(excess / dt_grid).astype(np.int64), 0, n_grid - 1)
+    # Fine weighted histogram on the grid (drop the rare beyond-window
+    # outliers so they do not pile up at the right edge), then Gaussian-smooth.
+    keep = excess <= t_max
+    idx  = np.clip(np.round(excess[keep] / dt_grid).astype(np.int64), 0, n_grid - 1)
     hist = np.zeros(n_grid, dtype=np.float64)
-    np.add.at(hist, idx, w)
+    np.add.at(hist, idx, w[keep])
 
     sigma_bins = bw / dt_grid
     h = gaussian_filter1d(hist, sigma=max(sigma_bins, 1e-6), mode="reflect")
@@ -168,6 +204,90 @@ def frequency_response(h_norm, dt, pad_factor=8):
     H_mag = np.abs(H)
     dc    = H_mag[0] if H_mag[0] > 1e-30 else 1.0
     return np.fft.rfftfreq(N_pad, d=dt), H_mag / dc
+
+
+def frequency_response_direct(
+    weights:        ndarray,
+    times:          ndarray,
+    delay_spread_s: float,
+    *,
+    n_freq:         int   = 800,
+    f_span:         float = 15.0,
+    max_photons:    int   = 8000,
+    rng_seed:       int   = 0,
+) -> Tuple[ndarray, ndarray]:
+    """
+    Channel frequency response |H(f)| via the exact discrete-time Fourier
+    transform of the weighted photon arrival train:
+
+        H(f) = Σ wᵢ · e^{−j2πf τᵢ} / Σ wᵢ ,     τᵢ = excess delay
+
+    Why not FFT-of-CIR?
+    -------------------
+    The displayed CIR is a Gaussian KDE (see ``compute_cir_kde``); its kernel
+    is a low-pass filter whose cut-off is set by the bandwidth *floor*
+    ``min_bw_s``.  Reading the 3 dB bandwidth off the FFT of that smoothed CIR
+    therefore **saturates** for near-ballistic channels: every short-range /
+    clear-water case clips to ~1/(2π·min_bw_s) instead of tracking its true
+    (few-picosecond) delay spread, producing a flat, range-independent
+    bandwidth curve.
+
+    The direct DTFT uses no histogram bin and no kernel, so the bandwidth it
+    yields is independent of any display smoothing and correctly decreases as
+    the delay spread grows with range.
+
+    Frequency grid
+    --------------
+    Scaled to the RMS delay spread, ``f_max = f_span / (2π·τ_rms)``, so the
+    −3 dB crossing is always captured and the grid itself shrinks with range
+    (no fixed-resolution artefact).  The arrival train is uniformly subsampled
+    to at most ``max_photons`` — the bandwidth is a low-order statistic and
+    converges well before then, and |H(f)| normalised to DC is unbiased under
+    uniform subsampling.
+
+    Returns
+    -------
+    freqs : frequency grid (Hz), shape (n_freq,)
+    H_mag : |H(f)| normalised to |H(0)| = 1, shape (n_freq,)
+    """
+    if times.size == 0 or float(weights.sum()) <= 0.0:
+        return np.array([0.0]), np.array([1.0])
+
+    excess = np.asarray(times, dtype=np.float64)
+    excess = excess - excess.min()
+    w      = np.asarray(weights, dtype=np.float64)
+
+    # Subsample for cost control (bandwidth converges with a few thousand)
+    if excess.size > max_photons:
+        rng = np.random.default_rng(rng_seed)
+        sel = rng.choice(excess.size, size=max_photons, replace=False)
+        excess, w = excess[sel], w[sel]
+
+    w_sum = float(w.sum())
+    if w_sum <= 0.0:
+        return np.array([0.0]), np.array([1.0])
+    w = w / w_sum
+
+    # Frequency span from the RMS delay spread (fall back to the sample's own
+    # spread if the caller's value is undefined).
+    ds = delay_spread_s
+    if not (ds and np.isfinite(ds) and ds > 0.0):
+        mean = float(np.sum(w * excess))
+        ds   = float(np.sqrt(max(np.sum(w * (excess - mean) ** 2), 0.0)))
+    if ds <= 0.0:
+        ds = 1e-12
+    f_max = f_span / (2.0 * np.pi * ds)
+    freqs = np.linspace(0.0, f_max, n_freq)
+
+    # DTFT, chunked over frequency to bound memory.
+    H     = np.empty(n_freq, dtype=np.complex128)
+    chunk = 256
+    for i in range(0, n_freq, chunk):
+        fb = freqs[i:i + chunk]
+        H[i:i + fb.size] = np.exp(-2.0j * np.pi * np.outer(fb, excess)) @ w
+    H_mag = np.abs(H)
+    dc    = H_mag[0] if H_mag[0] > 1e-30 else 1.0
+    return freqs, H_mag / dc
 
 
 def bandwidth_3dB(freqs, H_norm) -> float:
@@ -211,17 +331,25 @@ def compute_all_metrics(result, cfg: SimConfig, c: float, link_range: float) -> 
     p_bl  = beer_lambert_power_dB(c, link_range)
     ds    = rms_delay_spread(weights, times) if weights.size > 1 else float("nan")
 
-    # Publication-quality CIR: weighted Gaussian KDE rather than a sparse
-    # histogram, so the curve is smooth even at low photon counts.  The
-    # frequency response is the FFT of this smooth CIR (an exact transform
-    # pair), so both figures — and the 3 dB bandwidth read from |H(f)| — are
-    # free of histogram-binning noise.
+    # CIR figure: weighted Gaussian KDE — smooth and outlier-robust even at low
+    # photon counts (see compute_cir_kde).
     bw_scale  = float(getattr(cfg, "cir_kde_bw_scale", 1.0))
     n_grid    = int(getattr(cfg, "cir_n_grid", 512))
-    t_ax, h   = compute_cir_kde(weights, times, n_grid=n_grid, bw_scale=bw_scale)
-    dt_actual = float(t_ax[1] - t_ax[0]) if t_ax.size > 1 else cfg.dt_bin_s
-    freqs, Hn = frequency_response(h, dt_actual, pad_factor=16)
-    bw        = bandwidth_3dB(freqs, Hn)
+    tail_q    = float(getattr(cfg, "cir_tail_quantile", 0.995))
+    t_ax, h   = compute_cir_kde(weights, times, n_grid=n_grid,
+                                bw_scale=bw_scale, tail_quantile=tail_q)
+
+    # Frequency response + 3 dB bandwidth: direct DTFT of the raw arrivals, NOT
+    # the FFT of the smoothed CIR.  The KDE kernel is a low-pass whose cut-off
+    # is pinned by the bandwidth floor, which would otherwise saturate the
+    # bandwidth of near-ballistic channels (a flat, range-independent curve).
+    # The direct DTFT is smoothing-independent and tracks the true delay spread.
+    if weights.size > 1:
+        freqs, Hn = frequency_response_direct(weights, times, ds)
+        bw        = bandwidth_3dB(freqs, Hn)
+    else:
+        freqs, Hn = np.array([0.0]), np.array([1.0])
+        bw        = float("nan")
 
     return {
         "power_dB":        p_dB,

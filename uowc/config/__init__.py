@@ -130,9 +130,14 @@ class SimConfig:
     # multiplies the Silverman bandwidth: >1 smooths more (cleaner but lower
     # effective bandwidth / blurred fine structure), <1 sharpens (more faithful
     # but noisier).  cir_n_grid is the number of points on the delay grid the
-    # CIR and its FFT are evaluated on.
-    cir_kde_bw_scale: float = 1.0
-    cir_n_grid:       int   = 512
+    # CIR and its FFT are evaluated on.  cir_tail_quantile sets the CIR time
+    # window to a weighted high-quantile of the delay energy instead of the
+    # maximum delay, so a few far-scattered outlier photons don't stretch the
+    # x-axis and bury the ballistic peak (lower it, e.g. 0.99, to zoom in
+    # tighter on the peak; raise toward 1.0 to show more of the tail).
+    cir_kde_bw_scale:  float = 1.0
+    cir_n_grid:        int   = 512
+    cir_tail_quantile: float = 0.995
 
 
 # ─────────────────────────────────────────────────────────────────────────────
