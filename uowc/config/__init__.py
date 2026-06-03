@@ -109,8 +109,8 @@ class SimConfig:
     chunk_size:       int
     # ── Optional adaptive fields (defaults allow old call sites to work) ─
     min_captured_photons: int = 10_000
-    max_launched_photons: int = 100_000_000
-    conv_batch_photons: int = 1_000_000
+    max_launched_photons: int = 1_000_000_000
+    conv_batch_photons: int = 5_000_000
     rel_error_tol: float = 0.05
     min_conv_batches: int = 3
     # ── Multi-metric convergence ─────────────────────────────────────────
@@ -120,10 +120,10 @@ class SimConfig:
     # "frequency_response" (extend via convergence.register_metric).
     # Default is power-only for backward compatibility — opt into more, e.g.
     #     conv_metrics=("power", "delay_spread", "cir")
-    conv_metrics: Tuple[str, ...] = ("power",)
+    conv_metrics: Tuple[str, ...] = ("power","delay_spread")
     # Optional per-metric tolerance overrides as (name, tol) pairs; metrics
     # not listed fall back to rel_error_tol.  e.g. (("cir", 0.10),)
-    conv_tols: Tuple[Tuple[str, float], ...] = ()
+    conv_tols: Tuple[Tuple[str, float], ...] = (("delay_spread", 0.05))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
