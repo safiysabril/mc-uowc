@@ -7,16 +7,43 @@ Separation-of-Concern role
 ---------------------------
   This module knows about optics and photon-matter interactions only.
   It has no awareness of receivers, parallelism, file I/O, or plotting.
-  Every function is stateless and side-effect-free — safe to test in isolation.
+  Every function is stateless (except the two in-place absorption helpers
+  which mutate a caller-owned array) — safe to test in isolation.
 
-New in the inhomogeneous extension
------------------------------------
-  sample_step_woodcock     — free-flight sampling with a majorant c_max
-  accept_real_collision    — Woodcock acceptance test (scalar vs array c)
-  sample_hg_cos_theta_array — HG sampling with per-photon asymmetry g(z)
+Public API
+----------
+  Beer-Lambert
+    beer_lambert_power_dB
 
-  These three functions are the physics core of the Woodcock delta-tracking
-  algorithm.  The transport module calls them; this module only defines them.
+  Free-flight step sampling
+    sample_step_length          — homogeneous medium (Beer-Lambert inverse-CDF)
+    sample_step_woodcock        — inhomogeneous medium (Woodcock majorant)
+
+  Woodcock acceptance
+    accept_real_collision       — thinning-theorem acceptance test
+
+  Implicit absorption  (in-place, correct NumPy semantics)
+    apply_absorption            — scalar albedo, homogeneous path
+    apply_absorption_array      — per-photon albedo, Woodcock path
+
+  Variance reduction
+    russian_roulette            — full-array roulette (homogeneous)
+    russian_roulette_targeted   — index-targeted roulette (Woodcock)
+
+  Henyey-Greenstein phase function
+    sample_hg_cos_theta         — scalar g (homogeneous path)
+    sample_hg_cos_theta_array   — per-photon g array (Woodcock path)
+    rotate_direction            — MCML frame rotation with near-z singularity fix
+
+  Launch geometry
+    sample_launch_positions     — TEM₀₀ Gaussian beam positions
+    sample_launch_directions    — solid-angle-uniform cone sampling
+
+  Receiver optics
+    fresnel_transmittance       — Fresnel power T at planar water→glass interface
+
+  Time-of-flight
+    path_length_to_tof          — path length → propagation delay
 
 References
 ----------
@@ -26,13 +53,14 @@ References
   Wang, Jacques & Zheng (1995) CPC 47:131-146 — MCML algorithm
   Woodcock et al. (1965) — delta-tracking majorant method
   Lux & Koblinger (1991) — Monte Carlo Particle Transport, CRC Press
+  Born & Wolf (1999) — Principles of Optics, §1.5 — Fresnel equations
 """
 
 from __future__ import annotations
 import numpy as np
 from numpy import ndarray
 
-from uowc.config import C_MEDIUM
+from uowc.config import C_MEDIUM, N_WATER
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -145,45 +173,47 @@ def accept_real_collision(
 # Implicit-absorption weight update
 # ─────────────────────────────────────────────────────────────────────────────
 
-def update_weight(w: ndarray, omega: float) -> ndarray:
+def apply_absorption(w: ndarray, active: ndarray, omega: float) -> None:
     """
-    Apply the implicit-absorption (MCML) weight reduction.
+    Apply implicit-absorption (MCML) weight reduction in-place for a photon
+    subset identified by integer index array `active`.
 
-        W_{n+1} = W_n · ω        ω = b / c  (single-scattering albedo)
+        w[active] *= ω        ω = b / c  (single-scattering albedo)
+
+    Design note
+    -----------
+    NumPy fancy indexing with an integer array (e.g. ``np.where(alive)[0]``)
+    always returns a **copy**, not a view.  Passing ``w[active]`` to a
+    function and doing ``w_arg *= omega`` inside modifies the copy only.
+    This function receives the *full* array ``w`` and the index set ``active``
+    so the in-place update ``w[active] *= omega`` operates on the original
+    data correctly.
 
     Parameters
     ----------
-    w     : current photon weights, shape (N,)
-    omega : single-scattering albedo (scalar — homogeneous path)
-
-    Returns
-    -------
-    Updated weights (in-place modification for efficiency).
+    w      : full photon weight array, shape (N_chunk,) — modified in-place
+    active : 1-D integer index array of photons to update, shape (M,)
+    omega  : single-scattering albedo ω = b/c (scalar, homogeneous path)
     """
-    w *= omega
-    return w
+    w[active] *= omega
 
 
-def update_weight_array(w: ndarray, omega: ndarray) -> ndarray:
+def apply_absorption_array(w: ndarray, active: ndarray, omega: ndarray) -> None:
     """
-    In-place implicit-absorption weight reduction with per-photon albedo.
+    Per-photon implicit-absorption weight reduction in-place.
 
-        W_i *= ω_i    where ω_i = b(z_i) / c(z_i)
+        w[active[i]] *= omega[i]    where omega[i] = b(z_i) / c(z_i)
 
-    Used in the inhomogeneous path where each photon may be in a different
-    layer and therefore has a different local albedo.
+    Used in the Woodcock (inhomogeneous) path where each photon may sit in a
+    different layer and therefore has a different local albedo.
 
     Parameters
     ----------
-    w     : current photon weights, shape (N,)
-    omega : per-photon single-scattering albedo ω(z), shape (N,)
-
-    Returns
-    -------
-    Updated weights (in-place modification for efficiency).
+    w      : full photon weight array, shape (N_chunk,) — modified in-place
+    active : 1-D integer index array of real-collision photons, shape (M,)
+    omega  : per-photon single-scattering albedo at current layer, shape (M,)
     """
-    w *= omega
-    return w
+    w[active] *= omega
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -251,12 +281,12 @@ def russian_roulette_targeted(
     """
     if target.size == 0:
         return
-    low_mask  = w[target] < threshold
-    low_idx   = target[low_mask]
+    low_mask = w[target] < threshold
+    low_idx  = target[low_mask]
     if low_idx.size == 0:
         return
-    low_xi    = xi[low_mask]
-    survive   = low_xi < (1.0 / m)
+    low_xi  = xi[low_mask]
+    survive = low_xi < (1.0 / m)
     w[low_idx[survive]] *= m
     alive[low_idx[~survive]] = False
 
@@ -309,23 +339,14 @@ def sample_hg_cos_theta_array(g: ndarray, xi: ndarray) -> ndarray:
     Returns
     -------
     cos_theta : shape (N,), clipped to [−1, 1]
-
-    Notes
-    -----
-    Implementation uses masked array assignment to avoid division by zero
-    for nearly-isotropic photons (|g| < 1e-6).  The branch is data-dependent
-    but vectorised within each branch, so performance is good unless the
-    two populations are of very different sizes.
     """
     out      = np.empty(g.shape, dtype=np.float64)
     iso_mask = np.abs(g) < 1e-6
     hg_mask  = ~iso_mask
 
-    # Isotropic branch
     if iso_mask.any():
         out[iso_mask] = 1.0 - 2.0 * xi[iso_mask]
 
-    # HG branch
     if hg_mask.any():
         g_hg  = g[hg_mask]
         xi_hg = xi[hg_mask]
@@ -358,22 +379,20 @@ def rotate_direction(
     -------
     (ux_new, uy_new, uz_new) : rotated unit direction cosines
     """
-    cp    = np.cos(phi_sc)
-    sp    = np.sin(phi_sc)
-    denom = np.sqrt(np.maximum(1e-12, 1.0 - uz ** 2))
+    cp     = np.cos(phi_sc)
+    sp     = np.sin(phi_sc)
+    denom  = np.sqrt(np.maximum(1e-12, 1.0 - uz ** 2))
     near_z = np.abs(uz) > (1.0 - 1e-5)
     sgn    = np.where(uz >= 0.0, 1.0, -1.0)
 
-    ux_new = (sin_sc * (ux * uz * cp - uy * sp) / denom + ux * cos_sc)
-    uy_new = (sin_sc * (uy * uz * cp + ux * sp) / denom + uy * cos_sc)
-    uz_new = (-sin_sc * cp * denom + uz * cos_sc)
+    ux_new = sin_sc * (ux * uz * cp - uy * sp) / denom + ux * cos_sc
+    uy_new = sin_sc * (uy * uz * cp + ux * sp) / denom + uy * cos_sc
+    uz_new = -sin_sc * cp * denom + uz * cos_sc
 
-    # Singularity: photon nearly along ±z axis
     ux_new[near_z] = sin_sc[near_z] * cp[near_z]
     uy_new[near_z] = sin_sc[near_z] * sp[near_z] * sgn[near_z]
     uz_new[near_z] = cos_sc[near_z] * sgn[near_z]
 
-    # Renormalise (guards against floating-point drift over many steps)
     norm = np.sqrt(ux_new ** 2 + uy_new ** 2 + uz_new ** 2)
     norm = np.where(norm > 1e-15, norm, 1.0)
     return ux_new / norm, uy_new / norm, uz_new / norm
@@ -389,8 +408,12 @@ def sample_launch_positions(
     """
     Sample (x, y) launch positions from a TEM₀₀ Gaussian beam profile.
 
-    The 1/e² intensity radius is `waist_m`.  The radial CDF of a
-    2-D Gaussian gives  r = waist · √(−0.5 · ln ξ).
+    The 1/e² intensity radius is `waist_m`.  The radial CDF of the 2-D
+    Gaussian intensity profile I(r) ∝ exp(−2r²/w²) is:
+
+        F(r) = 1 − exp(−2r²/w²)
+
+    Inverting gives  r = w · √(−0.5 · ln ξ)  with ξ ∈ (0, 1].
 
     Returns
     -------
@@ -408,17 +431,80 @@ def sample_launch_directions(
     Sample initial direction cosines uniformly within a cone of half-angle
     `divergence_rad` (solid-angle uniform sampling).
 
+    The solid-angle element dΩ = sin θ dθ dφ integrates to a CDF that
+    inverts as:
+
         cos θ₀ = 1 − ξ · (1 − cos θ_max)
 
     Returns
     -------
-    ux, uy, uz : direction cosines, shape (N,), with uz > 0 (downward)
+    ux, uy, uz : direction cosines, shape (N,), with uz > 0 (forward/downward)
     """
     cos_max = np.cos(divergence_rad)
     cos_th  = 1.0 - rng.uniform(size=N) * (1.0 - cos_max)
     sin_th  = np.sqrt(np.maximum(0.0, 1.0 - cos_th ** 2))
     phi     = rng.uniform(0.0, 2.0 * np.pi, N)
     return sin_th * np.cos(phi), sin_th * np.sin(phi), cos_th
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Receiver optics — Fresnel transmittance
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fresnel_transmittance(
+    cos_inc: ndarray,
+    n1: float = N_WATER,   # seawater (default)
+    n2: float = 1.50,      # borosilicate glass receiver window (default)
+) -> ndarray:
+    """
+    Fresnel power transmittance T for unpolarized light at a planar n1→n2
+    interface (e.g. seawater → receiver glass window).
+
+    Uses the exact Fresnel equations for both polarisations:
+
+        R_s = ((n1 cos θᵢ − n2 cos θₜ) / (n1 cos θᵢ + n2 cos θₜ))²
+        R_p = ((n2 cos θᵢ − n1 cos θₜ) / (n2 cos θᵢ + n1 cos θₜ))²
+        T   = 1 − 0.5 · (R_s + R_p)
+
+    For angles beyond the critical angle (total internal reflection) T = 0.
+
+    Parameters
+    ----------
+    cos_inc : cosine of the angle of incidence θᵢ (≥ 0), shape (N,)
+    n1      : refractive index of the incident medium (default: N_WATER = 1.33)
+    n2      : refractive index of the transmitted medium (default: 1.50, glass)
+
+    Returns
+    -------
+    T : power transmittance ∈ [0, 1], shape (N,)
+
+    Notes
+    -----
+    At normal incidence (cos_inc = 1): T = 1 − ((n1−n2)/(n1+n2))² ≈ 0.9964
+    for the seawater→glass default pair — a ~0.4% correction.
+    At the critical angle θ_c = arcsin(n2/n1) (only relevant when n1 > n2):
+    T drops to zero.
+    """
+    sin_inc = np.sqrt(np.maximum(0.0, 1.0 - cos_inc ** 2))
+    sin_tr  = (n1 / n2) * sin_inc          # Snell's law
+    tir     = sin_tr >= 1.0                 # total internal reflection mask
+    sin_tr  = np.minimum(sin_tr, 1.0)       # clamp for sqrt safety
+    cos_tr  = np.sqrt(np.maximum(0.0, 1.0 - sin_tr ** 2))
+
+    n1_ci = n1 * cos_inc
+    n2_ct = n2 * cos_tr
+    n2_ci = n2 * cos_inc
+    n1_ct = n1 * cos_tr
+
+    denom_s = n1_ci + n2_ct
+    denom_p = n2_ci + n1_ct
+    denom_s = np.where(denom_s > 1e-15, denom_s, 1.0)
+    denom_p = np.where(denom_p > 1e-15, denom_p, 1.0)
+
+    Rs = ((n1_ci - n2_ct) / denom_s) ** 2
+    Rp = ((n2_ci - n1_ct) / denom_p) ** 2
+    T  = 1.0 - 0.5 * (Rs + Rp)
+    return np.where(tir, 0.0, T)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -433,10 +519,17 @@ def path_length_to_tof(path_length_m: ndarray) -> ndarray:
 
     Parameters
     ----------
-    path_length_m : cumulative path length (m), shape (N,)
+    path_length_m : cumulative geometric path length (m), shape (N,)
 
     Returns
     -------
     tof_s : time of flight (s), shape (N,)
+
+    Notes
+    -----
+    Uses the global C_MEDIUM = c₀/N_WATER (seawater at 530 nm, n = 1.33).
+    For stratified media with slightly different layer refractive indices
+    this is a first-order approximation; Δn across typical ocean layers
+    is ≲ 0.01, giving a ToF error below 0.8 %.
     """
     return path_length_m / C_MEDIUM
