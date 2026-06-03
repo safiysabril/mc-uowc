@@ -8,16 +8,26 @@ prints console summary tables, and saves per-photon data to Parquet.
 No figures are generated here.  Run ``plot.py`` once you have accumulated
 enough photons across one or more runs.
 
+Three comparison models
+-----------------------
+  Model 1  (homogeneous)   constant a, b, c — no turbulence.
+  Model 2  (inhomogeneous) depth-varying a, b, c with layered/gradient
+                           boundaries (Woodcock delta-tracking) — no turbulence.
+  Model 3  (turbulent)     Model 2's IOP structure + ocean optical turbulence
+                           (phase-screen angular kicks + scintillation fading).
+
+Each model writes its own Parquet file so the three scenarios stay separate:
+  photons_homogeneous.parquet · photons_inhomogeneous.parquet · photons_turbulent.parquet
+
 Examples
 --------
-Run everything (homogeneous + inhomogeneous):
+Run all three models:
     python main.py all
 
-Homogeneous only (Clear Water / Coastal Water, two beams, five ranges):
-    python main.py homogeneous
-
-Inhomogeneous only (Woodcock delta-tracking, stratified profiles):
-    python main.py inhomogeneous
+One model at a time:
+    python main.py homogeneous     # Model 1
+    python main.py inhomogeneous   # Model 2
+    python main.py turbulent       # Model 3
 
 Custom output directory:
     python main.py all --out ./results
@@ -47,12 +57,15 @@ import time
 from dataclasses import replace
 
 from uowc.config import SIM, ALL_WATERS, ALL_BEAMS
-# The inhomogeneous sweep uses the turbulence-coupled ocean profiles: each
-# CoupledOceanMedium bundles depth-aligned IOP and turbulence (ε, χ_T) layers,
-# so the Woodcock transport runs with phase-screen angular kicks + scintillation
-# fading.  Turbulence is therefore exercised by the inhomogeneous medium only;
-# the homogeneous sweep stays turbulence-free.
-from uowc.turbulence import ALL_COUPLED_MEDIA as ALL_INHOMOGENEOUS_MEDIA
+# Model 2 — inhomogeneous, turbulence-free: varying a,b,c with layered/gradient
+# boundaries, transported by Woodcock delta-tracking.  These plain MediumProfile
+# objects carry no turbulence, so the dispatch runs the turbulence-free worker.
+from uowc.medium import ALL_INHOMOGENEOUS_MEDIA
+# Model 3 — inhomogeneous + turbulence: CoupledOceanMedium profiles whose depth
+# layers bundle aligned IOP and turbulence (ε, χ_T).  The dispatch detects the
+# turbulence and runs the turbulent Woodcock worker (phase-screen angular kicks
+# along the path + scintillation fading at the receiver).
+from uowc.turbulence import ALL_COUPLED_MEDIA as ALL_TURBULENT_MEDIA
 
 from uowc.reporting import (
     print_run_header,
@@ -135,34 +148,46 @@ def run_homogeneous(out_dir: str, cfg) -> dict:
 
 
 # ============================================================================
-# INHOMOGENEOUS PIPELINE
+# INHOMOGENEOUS PIPELINE  (shared by Model 2 and Model 3)
 # ============================================================================
+#
+# Model 2 and Model 3 use the *same* Woodcock delta-tracking machinery — they
+# differ only in (a) the media set and (b) whether those media carry turbulence.
+# The dispatch layer decides turbulence per medium, so this one helper serves
+# both; a distinct seed_offset keeps their RNG sub-streams independent within a
+# single ``main.py all`` invocation.
 
-def run_inhomogeneous(out_dir: str, cfg) -> dict:
-    print_inhomogeneous_header(cfg, ALL_INHOMOGENEOUS_MEDIA)
+def _run_inhomogeneous_family(
+    out_dir:      str,
+    cfg,
+    media,
+    parquet_name: str,
+    seed_offset:  int,
+) -> dict:
+    print_inhomogeneous_header(cfg, media)
 
     raw = run_sweep_inhomogeneous_adaptive(
-        cfg, media=ALL_INHOMOGENEOUS_MEDIA, verbose=True,
+        cfg, media=media, seed_offset=seed_offset, verbose=True,
     )
 
     metrics = {}
-    for medium in ALL_INHOMOGENEOUS_MEDIA:
+    for medium in media:
         for beam in ALL_BEAMS:
             for Z in cfg.link_ranges_m:
                 key        = RunKey(medium.name, beam.name, float(Z))
                 metrics[key] = compute_all_metrics(raw[key], cfg, medium.c_max, Z)
 
-    print_inhomogeneous_summary(metrics, cfg, ALL_INHOMOGENEOUS_MEDIA)
+    print_inhomogeneous_summary(metrics, cfg, media)
 
     c_ref_map = {
         RunKey(medium.name, beam.name, float(Z)): medium.c_max
-        for medium in ALL_INHOMOGENEOUS_MEDIA
+        for medium in media
         for beam in ALL_BEAMS
         for Z in cfg.link_ranges_m
     }
 
     df           = to_dataframe(raw, c_ref_map=c_ref_map)
-    parquet_path = os.path.join(out_dir, "photons_inhomogeneous.parquet")
+    parquet_path = os.path.join(out_dir, parquet_name)
     append_to_parquet(df, parquet_path)
 
     print(f"\nAccumulated Parquet: {parquet_path}")
@@ -170,6 +195,22 @@ def run_inhomogeneous(out_dir: str, cfg) -> dict:
     _photon_count_table(accumulated)
 
     return {"raw": raw, "metrics": metrics, "dataframe": df}
+
+
+def run_inhomogeneous(out_dir: str, cfg) -> dict:
+    """Model 2 — inhomogeneous IOPs, turbulence-free (seed offset 1)."""
+    return _run_inhomogeneous_family(
+        out_dir, cfg, ALL_INHOMOGENEOUS_MEDIA,
+        parquet_name="photons_inhomogeneous.parquet", seed_offset=1,
+    )
+
+
+def run_turbulent(out_dir: str, cfg) -> dict:
+    """Model 3 — inhomogeneous IOPs + turbulence (seed offset 2)."""
+    return _run_inhomogeneous_family(
+        out_dir, cfg, ALL_TURBULENT_MEDIA,
+        parquet_name="photons_turbulent.parquet", seed_offset=2,
+    )
 
 
 # ============================================================================
@@ -186,8 +227,13 @@ def main():
     )
     parser.add_argument(
         "mode",
-        choices=["all", "homogeneous", "inhomogeneous"],
-        help="Which simulation to run.",
+        choices=["all", "homogeneous", "inhomogeneous", "turbulent"],
+        help="Which scenario to run.  "
+             "homogeneous = Model 1 (constant IOPs, no turbulence); "
+             "inhomogeneous = Model 2 (layered/gradient IOPs via Woodcock, no "
+             "turbulence); "
+             "turbulent = Model 3 (Model 2's IOP structure + turbulence); "
+             "all = run all three.",
     )
     parser.add_argument(
         "--out",
@@ -228,10 +274,13 @@ def main():
     t0 = time.perf_counter()
 
     if args.mode in ("all", "homogeneous"):
-        run_homogeneous(out_dir, cfg)
+        run_homogeneous(out_dir, cfg)        # Model 1
 
     if args.mode in ("all", "inhomogeneous"):
-        run_inhomogeneous(out_dir, cfg)
+        run_inhomogeneous(out_dir, cfg)      # Model 2
+
+    if args.mode in ("all", "turbulent"):
+        run_turbulent(out_dir, cfg)          # Model 3
 
     print(f"Total runtime: {time.perf_counter() - t0:.1f} s")
     print("Done.  Generate figures with:  python plot.py --out", out_dir)

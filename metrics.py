@@ -259,7 +259,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--inh", default=None, metavar="PATH",
-        help="Explicit path to an inhomogeneous Parquet file.",
+        help="Explicit path to an inhomogeneous (Model 2) Parquet file.",
+    )
+    parser.add_argument(
+        "--turb", default=None, metavar="PATH",
+        help="Explicit path to a turbulent (Model 3) Parquet file.",
     )
     parser.add_argument(
         "--arrays", action="store_true",
@@ -280,12 +284,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    hom_path = args.hom or os.path.join(args.out, "photons_homogeneous.parquet")
-    inh_path = args.inh or os.path.join(args.out, "photons_inhomogeneous.parquet")
+    hom_path  = args.hom  or os.path.join(args.out, "photons_homogeneous.parquet")
+    inh_path  = args.inh  or os.path.join(args.out, "photons_inhomogeneous.parquet")
+    turb_path = args.turb or os.path.join(args.out, "photons_turbulent.parquet")
 
     os.makedirs(args.out, exist_ok=True)
-    found_any = False
-    t0        = time.perf_counter()
+    t0 = time.perf_counter()
 
     kw = dict(
         noise_power  = args.noise_power,
@@ -293,45 +297,39 @@ def main() -> None:
         sigma_r2     = args.sigma_r2,
     )
 
-    if os.path.exists(hom_path):
-        found_any = True
-        print(f"\nLoading {hom_path} ...", flush=True)
-        df      = pd.read_parquet(hom_path)
-        summary, arrays = compute_metrics_from_df(df, **kw)
+    def _process(path: str, label: str) -> bool:
+        """Compute and write metrics for one model's Parquet; True if it ran."""
+        if not os.path.exists(path):
+            return False
+        print(f"\nLoading {path} ...", flush=True)
+        summary, arrays = compute_metrics_from_df(pd.read_parquet(path), **kw)
 
-        csv_path = os.path.join(args.out, "metrics_homogeneous.csv")
+        csv_path = os.path.join(args.out, f"metrics_{label}.csv")
         summary.to_csv(csv_path, index=False)
         print(f"  Saved  {csv_path}  ({len(summary)} rows)")
         print(summary.to_string(index=False))
 
         if args.arrays:
-            npz_path = os.path.join(args.out, "cir_homogeneous.npz")
+            npz_path = os.path.join(args.out, f"cir_{label}.npz")
             save_arrays(arrays, npz_path)
             print(f"  Saved  {npz_path}")
+        return True
 
-    if os.path.exists(inh_path):
-        found_any = True
-        print(f"\nLoading {inh_path} ...", flush=True)
-        df      = pd.read_parquet(inh_path)
-        summary, arrays = compute_metrics_from_df(df, **kw)
+    # Model 1 / Model 2 / Model 3
+    ran = [
+        _process(hom_path,  "homogeneous"),
+        _process(inh_path,  "inhomogeneous"),
+        _process(turb_path, "turbulent"),
+    ]
 
-        csv_path = os.path.join(args.out, "metrics_inhomogeneous.csv")
-        summary.to_csv(csv_path, index=False)
-        print(f"  Saved  {csv_path}  ({len(summary)} rows)")
-        print(summary.to_string(index=False))
-
-        if args.arrays:
-            npz_path = os.path.join(args.out, "cir_inhomogeneous.npz")
-            save_arrays(arrays, npz_path)
-            print(f"  Saved  {npz_path}")
-
-    if not found_any:
+    if not any(ran):
         print(
             f"\nNo Parquet files found.\n"
             f"  Expected: {hom_path}\n"
-            f"         or {inh_path}\n\n"
-            f"Run the simulation first:\n"
-            f"  python main.py homogeneous --out {args.out}\n",
+            f"         or {inh_path}\n"
+            f"         or {turb_path}\n\n"
+            f"Run the simulation first, e.g.:\n"
+            f"  python main.py all --out {args.out}\n",
             file=sys.stderr,
         )
         sys.exit(1)

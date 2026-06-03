@@ -60,8 +60,8 @@ import time
 import pandas as pd
 
 from uowc.config import SIM, RECEIVER
-# Must match the media simulated by main.py — the turbulence-coupled profiles.
-from uowc.turbulence import ALL_COUPLED_MEDIA as ALL_INHOMOGENEOUS_MEDIA
+from uowc.medium import ALL_INHOMOGENEOUS_MEDIA          # Model 2 media
+from uowc.turbulence import ALL_COUPLED_MEDIA            # Model 3 media
 from uowc.metrics import compute_all_metrics
 from uowc.plotting import plot_all, plot_all_inhomogeneous
 from uowc.reporting import print_summary_tables, print_inhomogeneous_summary
@@ -96,8 +96,17 @@ def _photon_count_table(df: pd.DataFrame) -> None:
     print()
 
 
-def _plot_one(df: pd.DataFrame, out_dir: str, medium_type: str) -> None:
-    """Reconstruct metrics from ``df`` and write all figures to ``out_dir``."""
+def _plot_one(df: pd.DataFrame, fig_dir: str, kind: str, media=None) -> None:
+    """Reconstruct metrics from ``df`` and write all figures to ``fig_dir``.
+
+    ``kind`` is "homogeneous" (Model 1), "inhomogeneous" (Model 2) or
+    "turbulent" (Model 3).  Models 2 and 3 share the inhomogeneous figure family
+    (fig_inh*), so Model 3 is written to its own ``fig_dir`` (a ``turbulent/``
+    subdirectory) to avoid overwriting Model 2's figures.  ``media`` is the list
+    of media profiles for the inhomogeneous families (Model 2: layered/gradient;
+    Model 3: coupled-ocean).
+    """
+    os.makedirs(fig_dir, exist_ok=True)
     _photon_count_table(df)
     raw   = reconstruct_sweep_results(df)
     c_map = c_ref_map_from_df(df)
@@ -107,15 +116,15 @@ def _plot_one(df: pd.DataFrame, out_dir: str, medium_type: str) -> None:
         for key, result in raw.items()
     }
 
-    diag_dir = os.path.join(out_dir, "diagnostics")
+    diag_dir = os.path.join(fig_dir, "diagnostics")
     stats    = capture_statistics_with_launched(df, launched_map_from_df(df))
 
-    if medium_type == "homogeneous":
+    if kind == "homogeneous":
         print_summary_tables(metrics, SIM)
-        plot_all(metrics, SIM, save_dir=out_dir)
+        plot_all(metrics, SIM, save_dir=fig_dir)
     else:
-        print_inhomogeneous_summary(metrics, SIM, ALL_INHOMOGENEOUS_MEDIA)
-        plot_all_inhomogeneous(metrics, SIM, ALL_INHOMOGENEOUS_MEDIA, save_dir=out_dir)
+        print_inhomogeneous_summary(metrics, SIM, media)
+        plot_all_inhomogeneous(metrics, SIM, media, save_dir=fig_dir)
 
     plot_all_diagnostics(
         df, stats, diag_dir,
@@ -145,8 +154,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--inh", default=None, metavar="PATH",
-        help="Explicit path to an inhomogeneous Parquet file. "
+        help="Explicit path to an inhomogeneous (Model 2) Parquet file. "
              "Overrides the default <out>/photons_inhomogeneous.parquet.",
+    )
+    parser.add_argument(
+        "--turb", default=None, metavar="PATH",
+        help="Explicit path to a turbulent (Model 3) Parquet file. "
+             "Overrides the default <out>/photons_turbulent.parquet. "
+             "Model 3 figures are written to <out>/turbulent/.",
     )
     parser.add_argument(
         "--merge", nargs="+", metavar="PATH",
@@ -168,16 +183,21 @@ def main() -> None:
         print(f"Merging {len(args.merge)} Parquet files → {args.merge_out} ...")
         merge_parquet_files(args.merge, args.merge_out)
         print("Merge done.")
-        # After merging, plot from the merged file if it matches a known name
+        # After merging, plot from the merged file if it matches a known name.
+        # Check "turbulent" and "inhomogeneous" before "homogeneous" since the
+        # latter is a substring of the former.
         merged_name = os.path.basename(args.merge_out)
-        if "homogeneous" in merged_name and not args.hom:
-            args.hom = args.merge_out
+        if "turbulent" in merged_name and not args.turb:
+            args.turb = args.merge_out
         elif "inhomogeneous" in merged_name and not args.inh:
             args.inh = args.merge_out
+        elif "homogeneous" in merged_name and not args.hom:
+            args.hom = args.merge_out
 
     # ── Resolve Parquet paths ─────────────────────────────────────────────────
-    hom_path = args.hom or os.path.join(args.out, "photons_homogeneous.parquet")
-    inh_path = args.inh or os.path.join(args.out, "photons_inhomogeneous.parquet")
+    hom_path  = args.hom  or os.path.join(args.out, "photons_homogeneous.parquet")
+    inh_path  = args.inh  or os.path.join(args.out, "photons_inhomogeneous.parquet")
+    turb_path = args.turb or os.path.join(args.out, "photons_turbulent.parquet")
 
     found_any = False
     t0 = time.perf_counter()
@@ -194,28 +214,43 @@ def main() -> None:
         ).size()
         print(f"  {n_photons:,} captured photons across {len(runs)} run combinations")
         _plot_one(df, args.out, "homogeneous")
-        print(f"  Homogeneous figures written to {args.out}/")
+        print(f"  Homogeneous (Model 1) figures written to {args.out}/")
 
     if os.path.exists(inh_path):
         found_any = True
-        print(f"\nLoading inhomogeneous data: {inh_path}")
+        print(f"\nLoading inhomogeneous (Model 2) data: {inh_path}")
         df = pd.read_parquet(inh_path)
         n_photons = len(df)
         runs = df.groupby(
             ["medium_name", "beam_name", "link_range_m"], observed=True
         ).size()
         print(f"  {n_photons:,} captured photons across {len(runs)} run combinations")
-        _plot_one(df, args.out, "inhomogeneous")
-        print(f"  Inhomogeneous figures written to {args.out}/")
+        _plot_one(df, args.out, "inhomogeneous", media=ALL_INHOMOGENEOUS_MEDIA)
+        print(f"  Inhomogeneous (Model 2) figures written to {args.out}/")
+
+    if os.path.exists(turb_path):
+        found_any = True
+        turb_dir = os.path.join(args.out, "turbulent")
+        print(f"\nLoading turbulent (Model 3) data: {turb_path}")
+        df = pd.read_parquet(turb_path)
+        n_photons = len(df)
+        runs = df.groupby(
+            ["medium_name", "beam_name", "link_range_m"], observed=True
+        ).size()
+        print(f"  {n_photons:,} captured photons across {len(runs)} run combinations")
+        _plot_one(df, turb_dir, "turbulent", media=ALL_COUPLED_MEDIA)
+        print(f"  Turbulent (Model 3) figures written to {turb_dir}/")
 
     if not found_any:
         print(
             f"\nNo Parquet files found.\n"
             f"  Expected: {hom_path}\n"
-            f"         or {inh_path}\n\n"
+            f"         or {inh_path}\n"
+            f"         or {turb_path}\n\n"
             f"Run the simulation first:\n"
-            f"  python main.py homogeneous --out {args.out}\n"
-            f"  python main.py inhomogeneous --out {args.out}\n",
+            f"  python main.py homogeneous   --out {args.out}   # Model 1\n"
+            f"  python main.py inhomogeneous --out {args.out}   # Model 2\n"
+            f"  python main.py turbulent     --out {args.out}   # Model 3\n",
             file=sys.stderr,
         )
         sys.exit(1)

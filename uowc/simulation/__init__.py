@@ -343,5 +343,16 @@ def run_sweep_adaptive(cfg, *, waters=ALL_WATERS, beams=ALL_BEAMS, verbose=True)
 
 
 def run_sweep_inhomogeneous_adaptive(cfg, *, media: Sequence[MediumProfile],
-                                     beams=ALL_BEAMS, verbose=True):
-    return _run_sweep(run_one_inhomogeneous_adaptive, media, beams, cfg, 1, verbose)
+                                     beams=ALL_BEAMS, seed_offset: int = 1,
+                                     verbose=True):
+    """Adaptive Woodcock sweep over inhomogeneous media.
+
+    Turbulence is decided per medium by the dispatch layer: a plain
+    LayeredMedium/GradientMedium runs turbulence-free (Model 2), a turbulence-
+    carrying CoupledOceanMedium runs with phase-screen kicks + scintillation
+    (Model 3).  ``seed_offset`` distinguishes the RNG sub-streams of the two
+    scenarios so that, within one ``main.py all`` invocation, Model 2 and
+    Model 3 draw independent photons (Model 2 uses 1, Model 3 uses 2).
+    """
+    return _run_sweep(run_one_inhomogeneous_adaptive, media, beams, cfg,
+                      seed_offset, verbose)
