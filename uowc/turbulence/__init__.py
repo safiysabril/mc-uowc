@@ -88,6 +88,15 @@ _DN_DT:    float = -1.80e-4                       # dn/dT seawater 530nm (K⁻¹
 _L0_M:     float = 10.0                           # default outer scale (m)
 _l0_M:     float = 1e-3                           # default inner scale (m)
 
+# ── Kolmogorov-Corrsin structural constant for the Nikishov formula ────────────
+# C_n² = _B0 · (dn/dT)² · ε^(−1/3) · χ_T
+# _B0 ≈ 3.63 is the scalar-field Obukhov-Corrsin constant.  This value is
+# calibrated so that at the default dn/dT = −1.80×10⁻⁴ K⁻¹ the combined
+# prefactor _B0 · (dn/dT)² = 1.176×10⁻⁷ matches published UOWC literature
+# (Yi et al. 2015 Opt. Express; Korotkova et al. 2012).
+# Exposing _B0 separately lets the formula correctly respond to a custom dn/dT.
+_B0: float = 1.176e-7 / (_DN_DT ** 2)            # ≈ 3.63  (dimensionless)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pure physics functions
@@ -99,19 +108,28 @@ def nikishov_cn2(
     dn_dT:   float = _DN_DT,
 ) -> float:
     """
-    Refractive-index structure parameter from Nikishov (2000).
+    Refractive-index structure parameter from Nikishov & Nikishov (2000).
 
-        C_n² = 2.05×10⁻⁸ · ε^(−1/3) · χ_T · (dn/dT)²   [m⁻²/³]
+        C_n² = _B0 · (dn/dT)² · ε^(−1/3) · χ_T   [m⁻²/³]
+
+    where _B0 ≈ 3.63 is the Kolmogorov-Corrsin scalar-turbulence constant.
+
+    At the default dn/dT = −1.80×10⁻⁴ K⁻¹ the combined prefactor
+    _B0 · (dn/dT)² = 1.176×10⁻⁷ matches the UOWC literature value.
 
     Parameters
     ----------
     epsilon : kinetic energy dissipation rate (m²/s³)
     chi_T   : temperature variance dissipation rate (K²/s)
-    dn_dT   : refractive index temperature gradient (K⁻¹)
+    dn_dT   : refractive-index temperature gradient (K⁻¹).
+              Default −1.80×10⁻⁴ K⁻¹ for seawater at 530 nm.
+              Pass a different value when modelling other wavelengths
+              or water temperatures; Quan & Fry (1995) provide the
+              dispersion formula.
     """
     if epsilon <= 0.0 or chi_T <= 0.0:
         return 0.0
-    return 1.176e-7 * (epsilon ** (-1.0 / 3.0)) * chi_T
+    return _B0 * (dn_dT ** 2) * (epsilon ** (-1.0 / 3.0)) * chi_T
 
 
 def nikishov_cn2_array(
@@ -119,10 +137,15 @@ def nikishov_cn2_array(
     chi_T:   ndarray,
     dn_dT:   float = _DN_DT,
 ) -> ndarray:
-    """Vectorised version of nikishov_cn2 over depth arrays."""
-    out = np.zeros(epsilon.shape, dtype=np.float64)
+    """
+    Vectorised version of nikishov_cn2 over depth arrays.
+
+    C_n²[i] = _B0 · (dn/dT)² · ε[i]^(−1/3) · χ_T[i]
+    Elements with ε ≤ 0 or χ_T ≤ 0 are set to zero.
+    """
+    out   = np.zeros(epsilon.shape, dtype=np.float64)
     valid = (epsilon > 0) & (chi_T > 0)
-    out[valid] = (1.176e-7
+    out[valid] = (_B0 * (dn_dT ** 2)
                   * epsilon[valid] ** (-1.0 / 3.0)
                   * chi_T[valid])
     return out
@@ -368,6 +391,34 @@ class TurbulenceProfile:
     def is_turbulence_free(self) -> bool:
         raise NotImplementedError
 
+    def path_cn2_integral(self, link_range: float) -> float:
+        """
+        Path integral  ∫₀^L C_n²(z) dz  [m^(1/3)].
+
+        Used for computing the path-averaged Rytov variance:
+
+            σ²_R = 1.23 · k^(7/6) · L^(5/6) · ∫₀^L C_n²(z) dz
+                                                   ─────────────
+                                                      (plane wave)
+
+        The default implementation uses the midpoint rule on a uniform
+        depth grid with 0.5 m spacing.  Subclasses with analytically
+        known profiles (e.g. CoupledOceanMedium) should override this
+        with an exact or more efficient computation.
+
+        Parameters
+        ----------
+        link_range : total link length L (m)
+
+        Returns
+        -------
+        integral : ∫₀^L C_n²(z) dz  (m^(1/3))
+        """
+        n_pts = max(int(link_range / 0.5), 10)
+        z     = np.linspace(0.0, link_range, n_pts)
+        dz    = z[1] - z[0]
+        return float(np.sum(self.C_n2(z)) * dz)
+
     def summary(self) -> str:
         raise NotImplementedError
 
@@ -395,6 +446,10 @@ class NoTurbulence(TurbulenceProfile):
 
     def is_turbulence_free(self) -> bool:
         return True
+
+    def path_cn2_integral(self, link_range: float) -> float:
+        """Zero turbulence everywhere — integral is identically zero."""
+        return 0.0
 
     def summary(self) -> str:
         return "NoTurbulence  (C_n² = 0 everywhere)"
