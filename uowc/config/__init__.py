@@ -120,10 +120,10 @@ class SimConfig:
     # "frequency_response" (extend via convergence.register_metric).
     # Default is power-only for backward compatibility — opt into more, e.g.
     #     conv_metrics=("power", "delay_spread", "cir")
-    conv_metrics: Tuple[str, ...] = ("power","delay_spread")
+    conv_metrics: Tuple[str, ...] = ("power", "delay_spread")
     # Optional per-metric tolerance overrides as (name, tol) pairs; metrics
     # not listed fall back to rel_error_tol.  e.g. (("cir", 0.10),)
-    conv_tols: Tuple[Tuple[str, float], ...] = (("delay_spread", 0.05))
+    conv_tols: Tuple[Tuple[str, float], ...] = (("delay_spread", 0.05),)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -174,7 +174,7 @@ SIM = SimConfig(
     master_seed          = 20260519,
     chunk_size           = 10_000,
     min_captured_photons = 10_000,      # stop when ≥ 10 k photons captured
-    max_launched_photons = 100_000_000, # hard cap: 100 M photons
+    max_launched_photons = 1_000_000_000, # hard cap: 1B photons
 )
 
 # ─────────────────────────────────────────────────────────────────────────────

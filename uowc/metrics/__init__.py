@@ -21,8 +21,37 @@ def received_power_dB(weights: ndarray, n_launched: int) -> float:
     return float(10.0 * np.log10(np.maximum(weights.sum() / n_launched, 1e-300)))
 
 
-def compute_cir(weights, times, dt, n_bins):
-    edges  = np.linspace(0.0, dt * n_bins, n_bins + 1)
+def compute_cir(weights, times, dt, n_bins, *, min_photons_per_bin: int = 5):
+    """
+    Build a normalised CIR histogram.
+
+    Bin count adapts when captured photons are too few for the requested
+    resolution: n_bins is reduced until each bin holds ≥ min_photons_per_bin
+    photons on average.  dt is stretched to cover the actual arrival-time
+    span so no photons are clipped.  The fixed window is used when times is
+    empty (fallback).
+
+    delay_spread and received_power are computed from raw (weights, times)
+    pairs in their own functions and are NOT affected by this binning.
+    """
+    if times.size == 0:
+        edges = np.linspace(0.0, dt * n_bins, n_bins + 1)
+        h, _   = np.histogram(times, bins=edges, weights=weights)
+        t_axis = 0.5 * (edges[:-1] + edges[1:])
+        return t_axis, h / (h.sum() + 1e-30)
+
+    t_span = float(times.max()) * 1.05          # 5% tail padding
+    t_span = max(t_span, dt * 10)               # at least 10 bins wide
+
+    # Statistics limit: enough photons per bin
+    n_stat = max(times.size // max(min_photons_per_bin, 1), 10)
+    # Resolution limit: keep dt if we have photons to fill it
+    n_phys = max(int(np.ceil(t_span / dt)), 10)
+    # Use whichever is tighter, capped at the requested maximum
+    n_use  = min(n_stat, n_phys, n_bins)
+    dt_use = t_span / n_use
+
+    edges  = np.linspace(0.0, t_span, n_use + 1)
     h, _   = np.histogram(times, bins=edges, weights=weights)
     t_axis = 0.5 * (edges[:-1] + edges[1:])
     return t_axis, h / (h.sum() + 1e-30)
@@ -68,7 +97,9 @@ def compute_all_metrics(result, cfg: SimConfig, c: float, link_range: float) -> 
     p_bl  = beer_lambert_power_dB(c, link_range)
     ds    = rms_delay_spread(weights, times) if weights.size > 1 else float("nan")
     t_ax, h   = compute_cir(weights, times, cfg.dt_bin_s, cfg.n_time_bins)
-    freqs, Hn = frequency_response(h, cfg.dt_bin_s)
+    # dt_actual is derived from the adaptive CIR so frequency axis is correct
+    dt_actual = float(t_ax[1] - t_ax[0]) if t_ax.size > 1 else cfg.dt_bin_s
+    freqs, Hn = frequency_response(h, dt_actual)
     bw        = bandwidth_3dB(freqs, Hn)
 
     return {
