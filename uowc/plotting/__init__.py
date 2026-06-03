@@ -125,6 +125,28 @@ def _semilogy_finite(ax, x, y, **kw) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Empty-metric sentinel
+# ─────────────────────────────────────────────────────────────────────────────
+# A (medium, beam, range) combination that captured zero photons is absent
+# from the Parquet file (to_dataframe skips empty groups), so the reconstructed
+# metrics dict has no entry for it.  Plotting must degrade gracefully — show a
+# blank panel / NaN gap — rather than KeyError.  All consumers use
+# ``metrics.get(key, _EMPTY_METRIC)``.
+_EMPTY_METRIC: Dict = {
+    "power_dB":        float("nan"),
+    "beer_lambert_dB": float("nan"),
+    "delay_spread_s":  float("nan"),
+    "bandwidth_hz":    float("nan"),
+    "t_axis":          np.array([]),
+    "cir":             np.array([]),
+    "freqs":           np.array([]),
+    "fr":              np.array([]),
+    "n_launched":      0,
+    "n_captured":      0,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Photon-count quality helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -185,13 +207,14 @@ def _render_cir_grid(
         for beam in ALL_BEAMS:
             for Z in (z_near, z_far):
                 key  = RunKey(entity_name, beam.name, float(Z))
-                m    = metrics[key]
+                m    = metrics.get(key, _EMPTY_METRIC)
                 ax   = axes[row, col]
-                t_ns = m["t_axis"] * 1e9
-                ax.plot(t_ns, m["cir"], color=colour, linewidth=1.2)
                 _style_ax(ax, "Time (ns)", "Norm. amplitude",
                           f"{entity_name}\n{beam.name} — {Z} m")
-                ax.set_xlim([0, t_ns[-1]])
+                t_ns = np.asarray(m["t_axis"]) * 1e9
+                if t_ns.size:
+                    ax.plot(t_ns, m["cir"], color=colour, linewidth=1.2)
+                    ax.set_xlim([0, t_ns[-1]])
                 _annotate_photon_count(ax, m.get("n_captured", 0))
                 col += 1
 
@@ -217,25 +240,25 @@ def _render_fr_grid(
         for beam in ALL_BEAMS:
             for Z in (z_near, z_far):
                 key    = RunKey(entity_name, beam.name, float(Z))
-                m      = metrics[key]
+                m      = metrics.get(key, _EMPTY_METRIC)
                 ax     = axes[row, col]
-                f_MHz  = m["freqs"] / 1e6
-                bw_MHz = m["bandwidth_hz"] / 1e6
-
-                ax.plot(f_MHz, m["fr"], color=colour, linewidth=1.2)
-                ax.axhline(1.0 / np.sqrt(2.0), color="grey",
-                           linestyle="--", linewidth=0.8, label="−3 dB")
-                ax.axvline(bw_MHz, color="red", linestyle=":",
-                           linewidth=1.0, label=f"BW={bw_MHz:.1f} MHz")
-
                 _style_ax(ax, "Frequency (MHz)", "|H(f)|",
                           f"{entity_name}\n{beam.name} — {Z} m")
-                # Clip x-axis to 5× the bandwidth so low-BW channels don't
-                # compress all interesting content into the left edge.
-                x_max = min(f_MHz[-1], max(bw_MHz * 5, 1.0))
-                ax.set_xlim([0, x_max])
-                ax.set_ylim([0, 1.1])
-                ax.legend(fontsize=7)
+
+                f_MHz  = np.asarray(m["freqs"]) / 1e6
+                if f_MHz.size:
+                    bw_MHz = m["bandwidth_hz"] / 1e6
+                    ax.plot(f_MHz, m["fr"], color=colour, linewidth=1.2)
+                    ax.axhline(1.0 / np.sqrt(2.0), color="grey",
+                               linestyle="--", linewidth=0.8, label="−3 dB")
+                    ax.axvline(bw_MHz, color="red", linestyle=":",
+                               linewidth=1.0, label=f"BW={bw_MHz:.1f} MHz")
+                    # Clip x-axis to 5× the bandwidth so low-BW channels don't
+                    # compress all interesting content into the left edge.
+                    x_max = min(f_MHz[-1], max(bw_MHz * 5, 1.0))
+                    ax.set_xlim([0, x_max])
+                    ax.set_ylim([0, 1.1])
+                    ax.legend(fontsize=7)
                 _annotate_photon_count(ax, m.get("n_captured", 0))
                 col += 1
 
@@ -263,7 +286,7 @@ def plot_received_power(
     )
     for ax, water in zip(axes, ALL_WATERS):
         for beam in ALL_BEAMS:
-            pwr = [metrics[RunKey(water.name, beam.name, float(Z))]["power_dB"]
+            pwr = [metrics.get(RunKey(water.name, beam.name, float(Z)), _EMPTY_METRIC)["power_dB"]
                    for Z in ranges]
             ax.plot(ranges, pwr,
                     marker=_HOM_MARKER[beam.name],
@@ -359,7 +382,7 @@ def plot_delay_spread(
     )
     for ax, water in zip(axes, ALL_WATERS):
         for beam in ALL_BEAMS:
-            ds = [metrics[RunKey(water.name, beam.name, float(Z))]["delay_spread_s"]
+            ds = [metrics.get(RunKey(water.name, beam.name, float(Z)), _EMPTY_METRIC)["delay_spread_s"]
                   for Z in ranges]
             _semilogy_finite(ax, ranges, ds,
                              marker=_HOM_MARKER[beam.name],
@@ -392,7 +415,7 @@ def plot_bandwidth(
     )
     for ax, water in zip(axes, ALL_WATERS):
         for beam in ALL_BEAMS:
-            bw = [metrics[RunKey(water.name, beam.name, float(Z))]["bandwidth_hz"] / 1e6
+            bw = [metrics.get(RunKey(water.name, beam.name, float(Z)), _EMPTY_METRIC)["bandwidth_hz"] / 1e6
                   for Z in ranges]
             _semilogy_finite(ax, ranges, bw,
                              marker=_HOM_MARKER[beam.name],
@@ -446,7 +469,7 @@ def plot_inhomogeneous_power(
         for i, medium in enumerate(media):
             colour = _INH_COLOURS[i % len(_INH_COLOURS)]
             marker = _INH_MARKERS[i % len(_INH_MARKERS)]
-            pwr    = [metrics[RunKey(medium.name, beam.name, float(Z))]["power_dB"]
+            pwr    = [metrics.get(RunKey(medium.name, beam.name, float(Z)), _EMPTY_METRIC)["power_dB"]
                       for Z in ranges]
             ax.plot(ranges, pwr, marker=marker, color=colour,
                     label=medium.name, **_LINE_KW)
@@ -555,7 +578,7 @@ def plot_inhomogeneous_delay_spread(
         for i, medium in enumerate(media):
             colour = _INH_COLOURS[i % len(_INH_COLOURS)]
             marker = _INH_MARKERS[i % len(_INH_MARKERS)]
-            ds     = [metrics[RunKey(medium.name, beam.name, float(Z))]["delay_spread_s"]
+            ds     = [metrics.get(RunKey(medium.name, beam.name, float(Z)), _EMPTY_METRIC)["delay_spread_s"]
                       for Z in ranges]
             _semilogy_finite(ax, ranges, ds, marker=marker, color=colour,
                              label=medium.name, **_LINE_KW)
@@ -594,7 +617,7 @@ def plot_inhomogeneous_bandwidth(
         for i, medium in enumerate(media):
             colour = _INH_COLOURS[i % len(_INH_COLOURS)]
             marker = _INH_MARKERS[i % len(_INH_MARKERS)]
-            bw     = [metrics[RunKey(medium.name, beam.name, float(Z))]["bandwidth_hz"] / 1e6
+            bw     = [metrics.get(RunKey(medium.name, beam.name, float(Z)), _EMPTY_METRIC)["bandwidth_hz"] / 1e6
                       for Z in ranges]
             _semilogy_finite(ax, ranges, bw, marker=marker, color=colour,
                              label=medium.name, **_LINE_KW)

@@ -225,9 +225,9 @@ def save_arrays(array_store: dict, path: str) -> None:
     payload = {}
     for i, (key, arrays) in enumerate(sorted(
         array_store.items(),
-        key=lambda kv: (kv[0].medium_name, kv[0].beam_name, kv[0].link_range),
+        key=lambda kv: (kv[0].water_name, kv[0].beam_name, kv[0].link_range),
     )):
-        label = f"{key.medium_name} | {key.beam_name} | {key.link_range:.1f} m"
+        label = f"{key.water_name} | {key.beam_name} | {key.link_range:.1f} m"
         payload[f"label_{i}"]     = np.array(label)
         payload[f"t_axis_ns_{i}"] = arrays["t_axis_ns"]
         payload[f"cir_{i}"]       = arrays["cir"]

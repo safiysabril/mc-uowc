@@ -226,6 +226,35 @@ class ConvergenceMonitor:
 # Standard estimators  (reuse uowc.metrics — never reimplement physics)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _fixed_cir(weights, times, dt: float, n_bins: int) -> np.ndarray:
+    """CIR on a **fixed** absolute grid (constant length and constant bin
+    centres across every batch).
+
+    Why not ``metrics.compute_cir``?
+    --------------------------------
+    ``compute_cir`` adapts both the bin width and the bin *count* to each
+    batch (it picks ``n_use = min(n_stat, n_phys, n_bins)``).  That is correct
+    for a single final figure, but it makes the per-batch CIR vectors have
+    **different lengths** — so ``relative_standard_error`` could not
+    ``np.stack`` them (a hard ``ValueError``), and bin *i* of one batch would
+    not correspond to the same delay as bin *i* of another.
+
+    For a convergence *sample* we need one fixed grid so the batch-means
+    statistic is well defined.  Energy concentrates in the first few ns of
+    excess delay, so the relative-L2 error is dominated by the populated bins;
+    the constant grid is the statistically sound choice here.
+    """
+    h = np.zeros(n_bins, dtype=float)
+    if times.size:
+        excess = times - times.min()
+        edges  = np.linspace(0.0, dt * n_bins, n_bins + 1)
+        h, _   = np.histogram(excess, bins=edges, weights=weights)
+        s = h.sum()
+        if s > 0:
+            h = h / s
+    return h
+
+
 def _power_estimator(record: "PhotonRecord", n_launched: int) -> float:
     """Mean linear received power per launched photon for this batch."""
     w = record["weight"]
@@ -244,40 +273,40 @@ def _make_delay_spread(cfg: "SimConfig") -> Estimator:
 
 
 def _make_bandwidth(cfg: "SimConfig") -> Estimator:
-    from uowc.metrics import compute_cir, frequency_response, bandwidth_3dB
+    from uowc.metrics import frequency_response, bandwidth_3dB
 
     def est(record, n_launched):
         if record["weight"].size < 2:
             return None
-        _, h      = compute_cir(record["weight"], record["tof_s"],
-                                cfg.dt_bin_s, cfg.n_time_bins)
+        # Fixed grid → dt is genuinely cfg.dt_bin_s, so the frequency axis is
+        # correct (the previous code binned adaptively but still passed
+        # cfg.dt_bin_s, mis-scaling the spectrum).
+        h         = _fixed_cir(record["weight"], record["tof_s"],
+                               cfg.dt_bin_s, cfg.n_time_bins)
         freqs, Hn = frequency_response(h, cfg.dt_bin_s)
         return bandwidth_3dB(freqs, Hn)
     return est
 
 
 def _make_cir(cfg: "SimConfig") -> Estimator:
-    from uowc.metrics import compute_cir
-
     def est(record, n_launched):
         if record["weight"].size < 2:
             return None
-        _, h = compute_cir(record["weight"], record["tof_s"],
-                           cfg.dt_bin_s, cfg.n_time_bins)
-        return h                              # vector sample (shape convergence)
+        return _fixed_cir(record["weight"], record["tof_s"],
+                          cfg.dt_bin_s, cfg.n_time_bins)   # fixed-length vector
     return est
 
 
 def _make_frequency_response(cfg: "SimConfig") -> Estimator:
-    from uowc.metrics import compute_cir, frequency_response
+    from uowc.metrics import frequency_response
 
     def est(record, n_launched):
         if record["weight"].size < 2:
             return None
-        _, h   = compute_cir(record["weight"], record["tof_s"],
+        h      = _fixed_cir(record["weight"], record["tof_s"],
                             cfg.dt_bin_s, cfg.n_time_bins)
         _, Hn  = frequency_response(h, cfg.dt_bin_s)
-        return Hn                             # vector sample
+        return Hn                             # fixed-length vector sample
     return est
 
 

@@ -8,9 +8,10 @@ n_launched is read from RunResult.n_launched for correct normalisation.
 """
 
 from __future__ import annotations
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 import numpy as np
 from numpy import ndarray
+from scipy.ndimage import gaussian_filter1d
 from uowc.config import SimConfig
 from uowc.physics import beer_lambert_power_dB
 
@@ -63,6 +64,93 @@ def compute_cir(weights, times, dt, n_bins, *, min_photons_per_bin: int = 5):
     return t_axis, h / (h.sum() + 1e-30)
 
 
+def compute_cir_kde(
+    weights:  ndarray,
+    times:    ndarray,
+    *,
+    n_grid:   int   = 512,
+    bw_scale: float = 1.0,
+    min_bw_s: float = 1e-12,
+) -> Tuple[ndarray, ndarray]:
+    """
+    Smooth channel impulse response h(τ) via a weighted Gaussian kernel
+    density estimate (KDE) of the excess-delay distribution.
+
+    Why KDE instead of a histogram?
+    -------------------------------
+    A histogram of N captured photons into K bins carries ~Poisson(N/K)
+    counts per bin.  At the modest photon counts typical of long-range or
+    turbid UOWC links this produces a jagged, spiky CIR that is unfit for
+    publication — and FFT-ing that spiky CIR yields an equally noisy
+    frequency response.  A weighted Gaussian KDE turns the same photons into
+    a smooth, continuous h(τ) — the natural estimator of a continuous impulse
+    response — and degrades gracefully as the photon count falls.
+
+    Bandwidth selection
+    -------------------
+    Silverman's rule using the Kish effective sample size
+    N_eff = (Σwᵢ)² / Σwᵢ² for weighted samples:
+
+        b = bw_scale · 1.06 · σ_τ · N_eff^(−1/5)
+
+    so the smoothing automatically tracks both the spread of the arrivals and
+    the *effective* number of photons (more smoothing when photons are scarce).
+    ``bw_scale`` lets the caller trade smoothness against fidelity.
+
+    Implementation (binned KDE)
+    ---------------------------
+    The estimate is computed as a fine weighted histogram convolved with a
+    Gaussian — O(N + n_grid) rather than the O(N·n_grid) of a direct kernel
+    sum — so it stays cheap even for millions of captured photons.  The
+    convolution uses ``mode="reflect"`` at τ = 0, which is exactly the
+    reflection boundary correction for a one-sided density: it stops the
+    kernel leaking energy to τ < 0, keeps the leading (ballistic) edge sharp,
+    and conserves energy.
+
+    delay_spread and received_power are computed from the raw (weights, times)
+    in their own functions and are NOT affected by this smoothing.
+
+    Returns
+    -------
+    t_axis : excess-delay grid (s), shape (n_grid,), starting at 0
+    h      : peak-normalised CIR, shape (n_grid,)
+    """
+    if times.size == 0 or float(weights.sum()) <= 0.0:
+        return np.linspace(0.0, 1e-9, n_grid), np.zeros(n_grid)
+
+    excess = np.asarray(times, dtype=np.float64)
+    excess = excess - excess.min()
+    w      = np.asarray(weights, dtype=np.float64)
+    w_sum  = float(w.sum())
+
+    # Kish effective sample size for weighted data
+    n_eff = w_sum * w_sum / (float(np.sum(w * w)) + 1e-300)
+
+    mean  = float(np.sum(w * excess) / w_sum)
+    var   = float(np.sum(w * (excess - mean) ** 2) / w_sum)
+    sigma = np.sqrt(max(var, 0.0))
+
+    bw = 1.06 * sigma * n_eff ** (-0.2) if sigma > 0.0 else 0.0
+    bw = max(bw * bw_scale, min_bw_s)
+
+    t_max  = float(excess.max()) + 4.0 * bw
+    t_axis = np.linspace(0.0, t_max, n_grid)
+    dt_grid = t_axis[1] - t_axis[0]
+
+    # Fine weighted histogram on the grid, then Gaussian-smooth it.
+    idx  = np.clip(np.round(excess / dt_grid).astype(np.int64), 0, n_grid - 1)
+    hist = np.zeros(n_grid, dtype=np.float64)
+    np.add.at(hist, idx, w)
+
+    sigma_bins = bw / dt_grid
+    h = gaussian_filter1d(hist, sigma=max(sigma_bins, 1e-6), mode="reflect")
+
+    peak = float(h.max())
+    if peak > 0.0:
+        h = h / peak
+    return t_axis, h
+
+
 def rms_delay_spread(weights, times) -> float:
     if weights.size < 2 or weights.sum() == 0:
         return float("nan")
@@ -83,8 +171,25 @@ def frequency_response(h_norm, dt, pad_factor=8):
 
 
 def bandwidth_3dB(freqs, H_norm) -> float:
-    idx = np.where(H_norm < (1.0 / np.sqrt(2.0)))[0]
-    return float(freqs[idx[0]]) if idx.size > 0 else float(freqs[-1])
+    """
+    3 dB bandwidth: lowest frequency where |H(f)| drops below 1/√2.
+
+    The crossing is **linearly interpolated** between the two samples that
+    straddle the threshold, so the returned value is not quantised to the FFT
+    frequency grid — important when the bandwidth is a reported metric.
+    """
+    thr   = 1.0 / np.sqrt(2.0)
+    below = np.where(H_norm < thr)[0]
+    if below.size == 0:
+        return float(freqs[-1])
+    i = int(below[0])
+    if i == 0:
+        return float(freqs[0])
+    f0, f1 = float(freqs[i - 1]), float(freqs[i])
+    h0, h1 = float(H_norm[i - 1]), float(H_norm[i])
+    if h1 == h0:
+        return f1
+    return f0 + (thr - h0) * (f1 - f0) / (h1 - h0)
 
 
 def compute_all_metrics(result, cfg: SimConfig, c: float, link_range: float) -> Dict:
@@ -105,10 +210,17 @@ def compute_all_metrics(result, cfg: SimConfig, c: float, link_range: float) -> 
     p_dB  = received_power_dB(weights, n_launched)
     p_bl  = beer_lambert_power_dB(c, link_range)
     ds    = rms_delay_spread(weights, times) if weights.size > 1 else float("nan")
-    t_ax, h   = compute_cir(weights, times, cfg.dt_bin_s, cfg.n_time_bins)
-    # dt_actual is derived from the adaptive CIR so frequency axis is correct
+
+    # Publication-quality CIR: weighted Gaussian KDE rather than a sparse
+    # histogram, so the curve is smooth even at low photon counts.  The
+    # frequency response is the FFT of this smooth CIR (an exact transform
+    # pair), so both figures — and the 3 dB bandwidth read from |H(f)| — are
+    # free of histogram-binning noise.
+    bw_scale  = float(getattr(cfg, "cir_kde_bw_scale", 1.0))
+    n_grid    = int(getattr(cfg, "cir_n_grid", 512))
+    t_ax, h   = compute_cir_kde(weights, times, n_grid=n_grid, bw_scale=bw_scale)
     dt_actual = float(t_ax[1] - t_ax[0]) if t_ax.size > 1 else cfg.dt_bin_s
-    freqs, Hn = frequency_response(h, dt_actual)
+    freqs, Hn = frequency_response(h, dt_actual, pad_factor=16)
     bw        = bandwidth_3dB(freqs, Hn)
 
     return {

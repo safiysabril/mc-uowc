@@ -24,14 +24,20 @@ Usage
 Why merge?
 ----------
 Turbid water at long range captures very few photons per run.  Running
-the simulation multiple times (with different seeds) and merging the
-Parquet files accumulates more photons without increasing per-run RAM.
-The merged file tracks the total ``n_launched`` correctly so power
-normalization remains exact.
+the simulation multiple times and merging the Parquet files accumulates
+more photons without increasing per-run RAM.  The merged file tracks the
+total ``n_launched`` correctly so power normalization remains exact.
+
+IMPORTANT — each run must use a different RNG seed, otherwise you merge
+identical photons (the power stays correct but the CIR / delay-spread gain
+no real statistics).  ``main.py`` draws a fresh random seed per run by
+default, so separate invocations are already independent.  Note that
+appending to one Parquet file with ``main.py`` (the default workflow) is
+usually simpler than this explicit merge.
 
 Workflow example
 ----------------
-  # Run 3 times with the same config (different seeds each time via master_seed):
+  # Run 3 times — main.py uses a different random seed each time by default:
   python main.py homogeneous --out outputs_run1
   python main.py homogeneous --out outputs_run2
   python main.py homogeneous --out outputs_run3

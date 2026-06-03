@@ -105,8 +105,9 @@ def _print_delay_spread_table(
             row = f"  {Z:<12}"
             for beam in ALL_BEAMS:
                 key = RunKey(water.name, beam.name, float(Z))
-                ds  = metrics[key]["delay_spread_s"]
-                row += f"  {ds:<28.4e}"
+                m   = metrics.get(key)
+                cell = f"{m['delay_spread_s']:.4e}" if m is not None else "(no photons)"
+                row += f"  {cell:<28}"
             print(row)
 
 
@@ -120,9 +121,11 @@ def _print_power_table(
             row = f"  {Z:<12}"
             for beam in ALL_BEAMS:
                 key = RunKey(water.name, beam.name, float(Z))
-                p   = metrics[key]["power_dB"]
-                bl  = metrics[key]["beer_lambert_dB"]
-                row += f"  MC={p:+7.2f}  BL={bl:+7.2f}{'':8}"
+                m   = metrics.get(key)
+                if m is not None:
+                    row += f"  MC={m['power_dB']:+7.2f}  BL={m['beer_lambert_dB']:+7.2f}{'':8}"
+                else:
+                    row += f"  {'(no photons)':<28}"
             print(row)
 
 
@@ -136,8 +139,9 @@ def _print_bandwidth_table(
             row = f"  {Z:<12}"
             for beam in ALL_BEAMS:
                 key = RunKey(water.name, beam.name, float(Z))
-                bw  = metrics[key]["bandwidth_hz"] / 1e6
-                row += f"  {bw:<28.2f}"
+                m   = metrics.get(key)
+                cell = f"{m['bandwidth_hz'] / 1e6:.2f}" if m is not None else "(no photons)"
+                row += f"  {cell:<28}"
             print(row)
     print()
 
@@ -164,8 +168,11 @@ def print_inhomogeneous_summary(
             row = f"  {Z:<12}"
             for beam in ALL_BEAMS:
                 key = RunKey(medium.name, beam.name, float(Z))
-                p   = metrics[key]["power_dB"]
-                row += f"  MC={p:+7.2f}{'':18}"
+                m   = metrics.get(key)
+                if m is not None:
+                    row += f"  MC={m['power_dB']:+7.2f}{'':18}"
+                else:
+                    row += f"  {'(no photons)':<28}"
             print(row)
 
     _table_header("INHOMOGENEOUS — DELAY SPREAD  (seconds)")
@@ -180,7 +187,8 @@ def print_inhomogeneous_summary(
             row = f"  {Z:<12}"
             for beam in ALL_BEAMS:
                 key = RunKey(medium.name, beam.name, float(Z))
-                ds  = metrics[key]["delay_spread_s"]
-                row += f"  {ds:<28.4e}"
+                m   = metrics.get(key)
+                cell = f"{m['delay_spread_s']:.4e}" if m is not None else "(no photons)"
+                row += f"  {cell:<28}"
             print(row)
     print()

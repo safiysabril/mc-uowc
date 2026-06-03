@@ -124,6 +124,15 @@ class SimConfig:
     # Optional per-metric tolerance overrides as (name, tol) pairs; metrics
     # not listed fall back to rel_error_tol.  e.g. (("cir", 0.10),)
     conv_tols: Tuple[Tuple[str, float], ...] = (("delay_spread", 0.05),)
+    # ── CIR / frequency-response figure smoothing ────────────────────────
+    # The published CIR is a weighted Gaussian KDE (see metrics.compute_cir_kde),
+    # which stays smooth even when few photons are captured.  cir_kde_bw_scale
+    # multiplies the Silverman bandwidth: >1 smooths more (cleaner but lower
+    # effective bandwidth / blurred fine structure), <1 sharpens (more faithful
+    # but noisier).  cir_n_grid is the number of points on the delay grid the
+    # CIR and its FFT are evaluated on.
+    cir_kde_bw_scale: float = 1.0
+    cir_n_grid:       int   = 512
 
 
 # ─────────────────────────────────────────────────────────────────────────────

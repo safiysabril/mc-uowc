@@ -42,7 +42,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import time
+from dataclasses import replace
 
 from uowc.config import SIM, ALL_WATERS, ALL_BEAMS
 from uowc.medium import ALL_INHOMOGENEOUS_MEDIA
@@ -95,25 +97,25 @@ def _photon_count_table(df: pd.DataFrame) -> None:
 # HOMOGENEOUS PIPELINE
 # ============================================================================
 
-def run_homogeneous(out_dir: str) -> dict:
-    print_run_header(SIM)
+def run_homogeneous(out_dir: str, cfg) -> dict:
+    print_run_header(cfg)
 
-    raw = run_sweep_adaptive(SIM, verbose=True)
+    raw = run_sweep_adaptive(cfg, verbose=True)
 
     metrics = {}
     for water in ALL_WATERS:
         for beam in ALL_BEAMS:
-            for Z in SIM.link_ranges_m:
+            for Z in cfg.link_ranges_m:
                 key        = RunKey(water.name, beam.name, float(Z))
-                metrics[key] = compute_all_metrics(raw[key], SIM, water.c, Z)
+                metrics[key] = compute_all_metrics(raw[key], cfg, water.c, Z)
 
-    print_summary_tables(metrics, SIM)
+    print_summary_tables(metrics, cfg)
 
     c_ref_map = {
         RunKey(water.name, beam.name, float(Z)): water.c
         for water in ALL_WATERS
         for beam in ALL_BEAMS
-        for Z in SIM.link_ranges_m
+        for Z in cfg.link_ranges_m
     }
 
     df           = to_dataframe(raw, c_ref_map=c_ref_map)
@@ -131,27 +133,27 @@ def run_homogeneous(out_dir: str) -> dict:
 # INHOMOGENEOUS PIPELINE
 # ============================================================================
 
-def run_inhomogeneous(out_dir: str) -> dict:
-    print_inhomogeneous_header(SIM, ALL_INHOMOGENEOUS_MEDIA)
+def run_inhomogeneous(out_dir: str, cfg) -> dict:
+    print_inhomogeneous_header(cfg, ALL_INHOMOGENEOUS_MEDIA)
 
     raw = run_sweep_inhomogeneous_adaptive(
-        SIM, media=ALL_INHOMOGENEOUS_MEDIA, verbose=True,
+        cfg, media=ALL_INHOMOGENEOUS_MEDIA, verbose=True,
     )
 
     metrics = {}
     for medium in ALL_INHOMOGENEOUS_MEDIA:
         for beam in ALL_BEAMS:
-            for Z in SIM.link_ranges_m:
+            for Z in cfg.link_ranges_m:
                 key        = RunKey(medium.name, beam.name, float(Z))
-                metrics[key] = compute_all_metrics(raw[key], SIM, medium.c_max, Z)
+                metrics[key] = compute_all_metrics(raw[key], cfg, medium.c_max, Z)
 
-    print_inhomogeneous_summary(metrics, SIM, ALL_INHOMOGENEOUS_MEDIA)
+    print_inhomogeneous_summary(metrics, cfg, ALL_INHOMOGENEOUS_MEDIA)
 
     c_ref_map = {
         RunKey(medium.name, beam.name, float(Z)): medium.c_max
         for medium in ALL_INHOMOGENEOUS_MEDIA
         for beam in ALL_BEAMS
-        for Z in SIM.link_ranges_m
+        for Z in cfg.link_ranges_m
     }
 
     df           = to_dataframe(raw, c_ref_map=c_ref_map)
@@ -188,18 +190,43 @@ def main():
         help="Output directory (default: ./outputs).  Parquet files in this "
              "directory are appended to on every run.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Master RNG seed.  IMPORTANT for the accumulation workflow: every "
+             "run uses a *different* seed so that appending to the Parquet file "
+             "adds statistically independent photons.  If omitted, a fresh random "
+             "seed is drawn from system entropy and printed (so you can reproduce "
+             "a run later with --seed).  Passing the same seed twice reproduces "
+             "the same photons exactly — do NOT reuse a seed across accumulation "
+             "runs or you will stack duplicate photons (false convergence).",
+    )
 
     args    = parser.parse_args()
     out_dir = args.out
     os.makedirs(out_dir, exist_ok=True)
 
+    # ── Per-run seed ──────────────────────────────────────────────────────────
+    # The default SIM.master_seed is fixed, which would make every invocation
+    # produce byte-identical photons; appending those to the Parquet file just
+    # duplicates samples (the power stays correct but the CIR / delay-spread
+    # gain no real statistics).  Draw a unique seed per run unless the user pins
+    # one explicitly, and always report it for reproducibility.
+    seed = args.seed if args.seed is not None else secrets.randbits(32)
+    cfg  = replace(SIM, master_seed=seed)
+    if args.seed is None:
+        print(f"Master seed: {seed}  (random — pass --seed {seed} to reproduce this run)")
+    else:
+        print(f"Master seed: {seed}  (user-specified)")
+
     t0 = time.perf_counter()
 
     if args.mode in ("all", "homogeneous"):
-        run_homogeneous(out_dir)
+        run_homogeneous(out_dir, cfg)
 
     if args.mode in ("all", "inhomogeneous"):
-        run_inhomogeneous(out_dir)
+        run_inhomogeneous(out_dir, cfg)
 
     print(f"Total runtime: {time.perf_counter() - t0:.1f} s")
     print("Done.  Generate figures with:  python plot.py --out", out_dir)
