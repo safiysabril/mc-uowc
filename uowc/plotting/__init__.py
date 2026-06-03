@@ -45,8 +45,11 @@ Design principles
 """
 
 from __future__ import annotations
+import logging
 import os
 from typing import Dict, List, Sequence
+
+_log = logging.getLogger(__name__)
 
 import numpy as np
 import matplotlib
@@ -109,7 +112,7 @@ def _style_ax(ax, xlabel: str = "", ylabel: str = "", title: str = "") -> None:
 def _save(fig: Figure, path: str) -> None:
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"    Saved → {path}")
+    _log.info("Saved → %s", path)
 
 
 def _semilogy_finite(ax, x, y, **kw) -> None:

@@ -62,12 +62,15 @@ References
 """
 
 from __future__ import annotations
+import logging
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+
+_log = logging.getLogger(__name__)
 
 from uowc.simulation import RunKey, RunResult
 
@@ -257,14 +260,14 @@ def to_parquet(df: pd.DataFrame, path: str | Path) -> None:
     """Write a full in-memory DataFrame to a single Parquet file."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, index=False, engine="auto", compression="snappy")
-    print(f"    Saved Parquet → {path}  ({os.path.getsize(path)/1e6:.1f} MB)")
+    _log.info("Saved Parquet → %s  (%.1f MB)", path, os.path.getsize(path) / 1e6)
 
 
 def to_csv(df: pd.DataFrame, path: str | Path) -> None:
     """Write DataFrame to CSV (for human inspection of small subsets)."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
-    print(f"    Saved CSV → {path}  ({os.path.getsize(path)/1e6:.1f} MB)")
+    _log.info("Saved CSV → %s  (%.1f MB)", path, os.path.getsize(path) / 1e6)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

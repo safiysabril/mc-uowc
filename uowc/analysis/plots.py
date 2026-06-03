@@ -24,8 +24,11 @@ Figures produced
 """
 
 from __future__ import annotations
+import logging
 import os
 from typing import Optional, Sequence
+
+_log = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
@@ -51,7 +54,7 @@ _TITLE_SZ = 9
 def _save(fig, path: str) -> None:
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"    Saved → {path}")
+    _log.info("Saved → %s", path)
 
 
 def _style(ax, xlabel="", ylabel="", title=""):
@@ -285,8 +288,9 @@ def plot_spatial_spread(
     df:       pd.DataFrame,
     save_dir: str,
     *,
-    medium_name: Optional[str] = None,
-    beam_name:   Optional[str] = None,
+    medium_name:       Optional[str]   = None,
+    beam_name:         Optional[str]   = None,
+    aperture_radius_m: Optional[float] = None,
     max_depths:  int = 4,
     max_points:  int = 3000,
 ) -> None:
@@ -295,10 +299,8 @@ def plot_spatial_spread(
 
     Shows whether the beam broadens with depth and whether captured photons
     cluster near the beam axis or spread to the aperture edge.
-    The receiver aperture boundary is shown as a dashed circle.
+    If ``aperture_radius_m`` is given, a dashed circle marks the aperture boundary.
     """
-    from uowc.config import RECEIVER
-
     sub = df.copy()
     if medium_name:
         sub = sub[sub["medium_name"] == medium_name]
@@ -318,7 +320,7 @@ def plot_spatial_spread(
         title += f"  |  {medium_name}"
     fig.suptitle(title, fontsize=11, fontweight="bold")
 
-    rx = RECEIVER.aperture_radius_m
+    rx = aperture_radius_m
     for idx, Z in enumerate(depths):
         row, col = divmod(idx, n_cols)
         ax  = axes[row][col]
@@ -329,11 +331,12 @@ def plot_spatial_spread(
         sc = ax.scatter(grp["x_m"], grp["y_m"],
                         c=grp["weight"], cmap="viridis",
                         s=3, alpha=0.5, vmin=0)
-        theta   = np.linspace(0, 2 * np.pi, 200)
-        ax.plot(rx * np.cos(theta), rx * np.sin(theta),
-                "r--", linewidth=1.0, label=f"Aperture r={rx:.3f} m")
-        ax.set_xlim(-rx * 1.2, rx * 1.2)
-        ax.set_ylim(-rx * 1.2, rx * 1.2)
+        if rx is not None:
+            theta = np.linspace(0, 2 * np.pi, 200)
+            ax.plot(rx * np.cos(theta), rx * np.sin(theta),
+                    "r--", linewidth=1.0, label=f"Aperture r={rx:.3f} m")
+            ax.set_xlim(-rx * 1.2, rx * 1.2)
+            ax.set_ylim(-rx * 1.2, rx * 1.2)
         ax.set_aspect("equal")
         _style(ax, "x (m)", "y (m)", f"{Z:.0f} m  (N={len(grp):,})")
         ax.legend(fontsize=6)
@@ -404,8 +407,9 @@ def plot_all_diagnostics(
     stats_df:    pd.DataFrame,
     save_dir:    str,
     *,
-    medium_name: Optional[str] = None,
-    beam_name:   Optional[str] = None,
+    medium_name:       Optional[str]   = None,
+    beam_name:         Optional[str]   = None,
+    aperture_radius_m: Optional[float] = None,
 ) -> None:
     """Render and save all six diagnostic figures."""
     os.makedirs(save_dir, exist_ok=True)
@@ -415,5 +419,6 @@ def plot_all_diagnostics(
                         medium_name=medium_name, beam_name=beam_name)
     plot_scattering_profile(df, save_dir)
     plot_spatial_spread(df, save_dir,
-                        medium_name=medium_name, beam_name=beam_name)
+                        medium_name=medium_name, beam_name=beam_name,
+                        aperture_radius_m=aperture_radius_m)
     plot_excess_path_distribution(df, save_dir, medium_name=medium_name)

@@ -42,7 +42,7 @@ import argparse
 import os
 import time
 
-from uowc.config import SIM, ALL_WATERS, ALL_BEAMS
+from uowc.config import SIM, ALL_WATERS, ALL_BEAMS, RECEIVER
 from uowc.medium import ALL_INHOMOGENEOUS_MEDIA
 
 from uowc.reporting import (
@@ -131,6 +131,7 @@ def run_homogeneous(out_dir: str):
         df_hom,
         stats_hom,
         diag_dir,
+        aperture_radius_m=RECEIVER.aperture_radius_m,
     )
 
     return {
@@ -215,6 +216,7 @@ def run_inhomogeneous(out_dir: str):
         stats_inh,
         diag_dir,
         medium_name=ALL_INHOMOGENEOUS_MEDIA[0].name,
+        aperture_radius_m=RECEIVER.aperture_radius_m,
     )
 
     return {

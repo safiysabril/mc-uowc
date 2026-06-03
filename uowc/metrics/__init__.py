@@ -90,7 +90,6 @@ def compute_all_metrics(result, cfg: SimConfig, c: float, link_range: float) -> 
 # ─────────────────────────────────────────────────────────────────────────────
 
 from scipy.special import erfc as _erfc
-import warnings as _warnings
 
 
 def compute_ber_ook(
@@ -172,37 +171,3 @@ def compute_snr(
     return (responsivity * P_r) ** 2 / noise_power
 
 
-def compute_coherence_time(
-    result,
-    medium,
-    link_range: float,
-) -> float:
-    """
-    Channel coherence time τ_c (s) via Taylor frozen-turbulence hypothesis.
-
-        τ_c = r₀ / v̄_⊥
-
-    Parameters
-    ----------
-    result     : RunResult (not directly used, provided for API consistency)
-    medium     : CoupledOceanMedium or TurbulenceProfile with
-                 .channel_coherence_time(link_range) or
-                 .fried_radius(link_range) + .v_current(z)
-    link_range : link length (m)
-
-    Returns
-    -------
-    τ_c in seconds, or np.inf if medium has no turbulence.
-    """
-    # CoupledOceanMedium has a direct method
-    if hasattr(medium, "channel_coherence_time"):
-        return float(medium.channel_coherence_time(link_range))
-
-    # Fallback for bare TurbulenceProfile
-    from uowc.turbulence import fried_parameter, coherence_time
-    z_arr = np.linspace(0, link_range, max(int(link_range / 0.5), 10))
-    dz    = z_arr[1] - z_arr[0]
-    cn2   = medium.C_n2(z_arr)
-    r0    = fried_parameter(float((cn2 * dz).sum()))
-    v_mid = float(medium.v_current(np.array([link_range / 2.0]))[0])
-    return coherence_time(r0, v_mid)
