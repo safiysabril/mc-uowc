@@ -53,6 +53,7 @@ import numpy as np
 from numpy import ndarray
 
 from uowc.config import WaterParams, CLEAR_WATER, COASTAL_WATER, TURBID_WATER
+from uowc.physics import iops_from_chlorophyll
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -405,6 +406,133 @@ class GradientMedium(MediumProfile):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ChlorophyllProfileMedium — continuous IOPs driven by a Kameda chlorophyll profile
+# ─────────────────────────────────────────────────────────────────────────────
+
+def kameda_chl_profile(
+    z:             ndarray,
+    *,
+    chl_background: float = 0.05,
+    peak_height:    float = 0.50,
+    peak_depth_m:   float = 12.0,
+    peak_width_m:   float = 5.0,
+) -> ndarray:
+    """
+    Vertical chlorophyll-a profile C(z) [mg m⁻³] — Kameda & Matsumura (1998) form:
+    a constant background plus a Gaussian deep-chlorophyll maximum (DCM).
+
+        C(z) = C_b + h · exp[ −((z − z_m) / (√2·σ))² ]
+
+    Parameters
+    ----------
+    z              : depth(s) (m), scalar or array.
+    chl_background : background chlorophyll C_b away from the DCM (mg m⁻³).
+    peak_height    : extra chlorophyll h added at the DCM centre (mg m⁻³).
+    peak_depth_m   : depth z_m of the DCM (m).
+    peak_width_m   : Gaussian width σ of the DCM (m).
+
+    Notes
+    -----
+    This is the standard background+Gaussian DCM shape used by Kameda-type
+    models.  The exact Kameda & Matsumura (1998) parameterisation ties h, z_m
+    and σ to the *surface* chlorophyll; substitute those expressions here if you
+    want the surface-driven form — the medium below is agnostic to how C(z) is
+    produced.
+    """
+    z = np.asarray(z, dtype=np.float64)
+    return chl_background + peak_height * np.exp(
+        -((z - peak_depth_m) / (np.sqrt(2.0) * peak_width_m)) ** 2
+    )
+
+
+@dataclass(frozen=True)
+class ChlorophyllProfileMedium(MediumProfile):
+    """
+    Inhomogeneous medium whose IOPs are computed *continuously* from a
+    depth-dependent chlorophyll profile (no layers, no sampling).
+
+    At every photon depth z the medium does, on demand:
+
+        z ──kameda_chl_profile──▶ C(z) ──iops_from_chlorophyll──▶ a(z), b(z)
+                                                                  c(z) = a + b
+
+    so ``attenuation(z)`` returns the exact Kameda-driven c at the photon's
+    position — this is the "functional" depth-description style (cf.
+    LayeredMedium's piecewise-constant slabs and GradientMedium's interpolated
+    samples).  The HG asymmetry g is held constant (ocean water is strongly
+    forward-scattering and g varies little); set ``g_const`` to change it.
+
+    Parameters
+    ----------
+    chl_background, peak_height, peak_depth_m, peak_width_m
+        Kameda DCM profile parameters (see :func:`kameda_chl_profile`).
+    g_const        : constant Henyey-Greenstein asymmetry parameter.
+    z_max_m        : depth span scanned to size the Woodcock majorant c_max.
+                     Must cover the link range; the DCM peak must lie within it.
+    name           : label for figures / console output.
+    c_max_override : if > 0, use this as the Woodcock majorant instead of the
+                     auto-computed maximum (use only if you know it bounds c(z)).
+    """
+    chl_background: float = 0.05
+    peak_height:    float = 0.50
+    peak_depth_m:   float = 12.0
+    peak_width_m:   float = 5.0
+    g_const:        float = 0.924
+    z_max_m:        float = 30.0
+    name:           str   = "Kameda Chlorophyll Profile"
+    c_max_override: float = 0.0
+
+    # ── chlorophyll at depth (Step 1) ─────────────────────────────────────────
+    def _chl(self, z: ndarray) -> ndarray:
+        return kameda_chl_profile(
+            z,
+            chl_background=self.chl_background,
+            peak_height=self.peak_height,
+            peak_depth_m=self.peak_depth_m,
+            peak_width_m=self.peak_width_m,
+        )
+
+    # ── MediumProfile interface (IOPs at depth z) ─────────────────────────────
+    def attenuation(self, z: ndarray) -> ndarray:
+        a, b = iops_from_chlorophyll(self._chl(z))
+        return a + b
+
+    def scattering(self, z: ndarray) -> ndarray:
+        _, b = iops_from_chlorophyll(self._chl(z))
+        return b
+
+    def asymmetry(self, z: ndarray) -> ndarray:
+        return np.full(np.shape(z), self.g_const, dtype=np.float64)
+
+    def albedo(self, z: ndarray) -> ndarray:
+        a, b = iops_from_chlorophyll(self._chl(z))
+        c = a + b
+        return b / np.where(c > 0, c, 1.0)
+
+    def is_homogeneous(self) -> bool:
+        return False
+
+    @property
+    def c_max(self) -> float:
+        if self.c_max_override > 0:
+            return float(self.c_max_override)
+        # Scan the column on a fine grid and take the peak c (the DCM), with a
+        # small safety margin, so the Woodcock majorant strictly bounds c(z).
+        zz = np.linspace(0.0, self.z_max_m, 400)
+        return float(self.attenuation(zz).max()) * 1.02
+
+    def summary(self) -> str:
+        zz = np.linspace(0.0, self.z_max_m, 200)
+        c  = self.attenuation(zz)
+        return (
+            f"ChlorophyllProfileMedium '{self.name}'  (Kameda DCM: "
+            f"C_b={self.chl_background} + {self.peak_height}@{self.peak_depth_m}m "
+            f"σ={self.peak_width_m}m mg/m³ | "
+            f"c∈[{c.min():.3f}, {c.max():.3f}] m⁻¹  c_max={self.c_max:.3f}  g={self.g_const})"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Preset inhomogeneous medium instances
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -449,5 +577,20 @@ COASTAL_GRADIENT = GradientMedium(
     name      = "Coastal Gradient (clear surface → turbid bottom)",
 )
 
+# ── Continuous chlorophyll-driven profile (Kameda DCM) ───────────────────────
+# IOPs computed on demand from a Kameda chlorophyll profile via the Case-1
+# bio-optical model — c(z) is evaluated exactly at each photon depth, no layers.
+# Oligotrophic open-ocean defaults: clear background with a deep chlorophyll
+# maximum near 12 m.  Tune the DCM parameters (or swap in the surface-driven
+# Kameda coefficients) to match your scenario.
+KAMEDA_CHL_PROFILE = ChlorophyllProfileMedium(
+    chl_background = 0.05,
+    peak_height    = 0.50,
+    peak_depth_m   = 12.0,
+    peak_width_m   = 5.0,
+    name           = "Kameda Chlorophyll Profile (DCM @12 m)",
+)
+
 # ── Convenience collection of all inhomogeneous presets ──────────────────────
-ALL_INHOMOGENEOUS_MEDIA = (STRATIFIED_OCEAN, DEEP_OCEAN_COLUMN, COASTAL_GRADIENT)
+ALL_INHOMOGENEOUS_MEDIA = (STRATIFIED_OCEAN, DEEP_OCEAN_COLUMN, COASTAL_GRADIENT,
+                           KAMEDA_CHL_PROFILE)

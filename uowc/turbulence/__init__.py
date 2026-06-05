@@ -80,6 +80,9 @@ import numpy as np
 from numpy import ndarray
 
 from uowc.config import WaterParams
+# Model-3 chlorophyll medium composes the Model-2 IOP profile (medium imports
+# only config + physics, so this turbulence→medium import introduces no cycle).
+from uowc.medium import ChlorophyllProfileMedium, KAMEDA_CHL_PROFILE
 
 # ── optical constants at 530 nm ───────────────────────────────────────────────
 _LAMBDA_M: float = 530e-9
@@ -646,6 +649,88 @@ class CoupledOceanMedium:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TurbulentChlorophyllMedium — continuous chlorophyll IOPs + turbulence (Model 3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class TurbulentChlorophyllMedium:
+    """
+    Model-3 medium: a continuous Kameda chlorophyll IOP profile coupled with
+    (depth-uniform) optical turbulence.
+
+    Composition, not a god-object: it *holds* a ChlorophyllProfileMedium for the
+    IOP concern — delegating every c(z)/b(z)/g(z) query to it — and *adds*
+    turbulence as a second concern (ε, χ_T → C_n² via the Nikishov formula).  It
+    presents both the MediumProfile and TurbulenceProfile protocols (duck-typed,
+    like CoupledOceanMedium), which is exactly what the turbulent Woodcock path
+    expects.  Reusing the very same ``iop`` object as the Model-2 preset makes
+    Model 2 vs Model 3 a clean A/B: identical IOPs, the only difference is
+    turbulence.
+
+    Parameters
+    ----------
+    iop           : ChlorophyllProfileMedium supplying c(z), b(z), g(z).
+    epsilon       : turbulent kinetic-energy dissipation rate ε (m²/s³).
+    chi_T         : temperature-variance dissipation rate χ_T (K²/s).
+    current_speed : transverse current speed (m/s) for the coherence-time model.
+    name          : label for figures / console output.
+    """
+    iop:           ChlorophyllProfileMedium
+    epsilon:       float = 1e-7
+    chi_T:         float = 3.95e-9
+    current_speed: float = 0.10
+    name:          str   = "Kameda Chlorophyll + Turbulence"
+
+    # ── MediumProfile — delegate every IOP query to the chlorophyll profile ───
+    @property
+    def c_max(self) -> float:
+        return self.iop.c_max
+
+    def attenuation(self, z: ndarray) -> ndarray:
+        return self.iop.attenuation(z)
+
+    def scattering(self, z: ndarray) -> ndarray:
+        return self.iop.scattering(z)
+
+    def asymmetry(self, z: ndarray) -> ndarray:
+        return self.iop.asymmetry(z)
+
+    def albedo(self, z: ndarray) -> ndarray:
+        return self.iop.albedo(z)
+
+    def is_homogeneous(self) -> bool:
+        return self.iop.is_homogeneous()
+
+    # ── TurbulenceProfile — uniform C_n² from the Nikishov formula ────────────
+    @property
+    def _cn2(self) -> float:
+        return nikishov_cn2(self.epsilon, self.chi_T)
+
+    def C_n2(self, z: ndarray) -> ndarray:
+        return np.full(np.shape(z), self._cn2, dtype=np.float64)
+
+    def is_turbulence_free(self) -> bool:
+        return self._cn2 == 0.0
+
+    def path_cn2_integral(self, link_range: float) -> float:
+        return self._cn2 * float(link_range)
+
+    def dn_dz_mean(self, z: ndarray) -> ndarray:
+        return np.zeros(np.shape(z), dtype=np.float64)
+
+    def v_current(self, z: ndarray) -> ndarray:
+        return np.full(np.shape(z), self.current_speed, dtype=np.float64)
+
+    def summary(self) -> str:
+        sr2 = rytov_variance_from_cn2(self._cn2, 25.0)
+        return (
+            f"TurbulentChlorophyllMedium '{self.name}'  "
+            f"[IOP {self.iop.name} | ε={self.epsilon:.1e} χ_T={self.chi_T:.1e} "
+            f"→ C_n²={self._cn2:.2e}  σ²_R(25 m)={sr2:.3f} ({turbulence_regime(sr2)})]"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Preset coupled ocean profiles
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -703,6 +788,18 @@ DEEP_OCEAN_STRATIFIED = CoupledOceanMedium(
     name="Deep Ocean Column (Clear → Coastal → Turbid)",
 )
 
+# ── Continuous Kameda chlorophyll profile + turbulence (Model 3) ──────────────
+# Reuses the EXACT Model-2 IOP profile (uowc.medium.KAMEDA_CHL_PROFILE) so the
+# two scenarios differ only by turbulence.  Weak-to-moderate turbulence by
+# default (ε=1e-7, χ_T=3.95e-9 → C_n²≈1e-13); tune to your scenario.
+KAMEDA_CHL_TURBULENT = TurbulentChlorophyllMedium(
+    iop           = KAMEDA_CHL_PROFILE,
+    epsilon       = 1e-7,
+    chi_T         = 3.95e-9,
+    current_speed = 0.10,
+    name          = "Kameda Chlorophyll + Turbulence (DCM @12 m)",
+)
+
 # ── Convenience null turbulence object ────────────────────────────────────────
 NO_TURBULENCE = NoTurbulence()
 
@@ -711,6 +808,7 @@ ALL_COUPLED_MEDIA = (
     COASTAL_SURFACE,
     STRATIFIED_THERMOCLINE,
     DEEP_OCEAN_STRATIFIED,
+    KAMEDA_CHL_TURBULENT,
 )
 
 

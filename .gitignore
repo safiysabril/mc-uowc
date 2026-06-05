@@ -226,6 +226,7 @@ __marimo__/
 *.docx
 *.xlsx
 *.csv
+*.txt
 
 # Database files
 *.parquet

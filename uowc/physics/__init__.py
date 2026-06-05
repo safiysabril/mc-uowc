@@ -533,3 +533,58 @@ def path_length_to_tof(path_length_m: ndarray) -> ndarray:
     is ≲ 0.01, giving a ToF error below 0.8 %.
     """
     return path_length_m / C_MEDIUM
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bio-optical model — chlorophyll → IOPs  (Case-1 waters, 530 nm)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Converts a chlorophyll-a concentration (mg m⁻³) into absorption a and
+# scattering b at the simulation wavelength, using the standard Case-1
+# relations.  c = a + b.  This is the "Step 2" that turns a chlorophyll *value*
+# into optical *coefficients*; the chlorophyll-vs-depth profile (Step 1) lives in
+# uowc.medium.
+#
+#     a(C) = a_w + A_φ · C^E_φ                       (water + phytoplankton)
+#     b(C) = b_w + b_p550 · (550/λ) · C^0.62         (water + particles)
+#
+# References: Morel (1991); Gordon & Morel (1983); Bricaud et al. (1998);
+#             Pope & Fry (1997) for pure-water absorption; Haltrin (1999).
+#
+# ⚠ The constants below are wavelength-specific (530 nm) reference values.
+#   Replace them with your own calibrated numbers if your paper uses a different
+#   source — they are isolated here precisely so the calibration is one edit.
+_A_W_530   = 0.0430    # pure-seawater absorption at 530 nm   (m⁻¹)
+_B_W_530   = 0.0019    # pure-seawater scattering  at 530 nm   (m⁻¹)
+_A_PHI_530 = 0.0180    # chl-specific phytoplankton absorption A(530)  (m²/mg)
+_E_PHI_530 = 0.650     # phytoplankton absorption exponent E(530)      (–)
+_BP_550    = 0.300     # particle scattering coefficient b_p(550) per C^0.62
+_LAMBDA_NM = 530.0     # simulation wavelength (nm)
+
+
+def iops_from_chlorophyll(chl: ndarray) -> tuple[ndarray, ndarray]:
+    """
+    Case-1 inherent optical properties from chlorophyll concentration.
+
+    Parameters
+    ----------
+    chl : chlorophyll-a concentration (mg m⁻³), scalar or array.  Negative
+          inputs are clipped to 0.
+
+    Returns
+    -------
+    (a, b) : absorption and scattering coefficients (m⁻¹), same shape as `chl`.
+             The beam-attenuation coefficient is c = a + b.
+
+    Notes
+    -----
+    More chlorophyll ⇒ more phytoplankton absorption *and* more particulate
+    scattering ⇒ larger c (murkier water).  Constants are 530 nm specific;
+    see the module-level notes to recalibrate.
+    """
+    chl   = np.maximum(np.asarray(chl, dtype=np.float64), 0.0)
+    a_phi = _A_PHI_530 * np.power(chl, _E_PHI_530)
+    a     = _A_W_530 + a_phi
+    b_p   = _BP_550 * (550.0 / _LAMBDA_NM) * np.power(chl, 0.62)
+    b     = _B_W_530 + b_p
+    return a, b
