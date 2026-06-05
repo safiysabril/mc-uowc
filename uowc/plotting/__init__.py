@@ -246,17 +246,24 @@ def _render_fr_grid(
                           f"{entity_name}\n{beam.name} — {Z} m")
 
                 f_MHz  = np.asarray(m["freqs"]) / 1e6
-                if f_MHz.size:
+                if f_MHz.size > 1:
                     bw_MHz = m["bandwidth_hz"] / 1e6
                     ax.plot(f_MHz, m["fr"], color=colour, linewidth=1.2)
                     ax.axhline(1.0 / np.sqrt(2.0), color="grey",
                                linestyle="--", linewidth=0.8, label="−3 dB")
-                    ax.axvline(bw_MHz, color="red", linestyle=":",
-                               linewidth=1.0, label=f"BW={bw_MHz:.1f} MHz")
-                    # Clip x-axis to 5× the bandwidth so low-BW channels don't
-                    # compress all interesting content into the left edge.
-                    x_max = min(f_MHz[-1], max(bw_MHz * 5, 1.0))
-                    ax.set_xlim([0, x_max])
+                    # A run with ≤1 captured photon has an undefined bandwidth
+                    # (NaN); only draw the marker / bandwidth-scaled x-limit when
+                    # it is finite, otherwise fall back to the data's own span so
+                    # the axis limits stay finite and non-degenerate.
+                    if np.isfinite(bw_MHz) and bw_MHz > 0:
+                        ax.axvline(bw_MHz, color="red", linestyle=":",
+                                   linewidth=1.0, label=f"BW={bw_MHz:.1f} MHz")
+                        # Clip x-axis to 5× the bandwidth so low-BW channels don't
+                        # compress all interesting content into the left edge.
+                        x_max = min(float(f_MHz[-1]), max(bw_MHz * 5, 1.0))
+                    else:
+                        x_max = float(f_MHz[-1])
+                    ax.set_xlim([0, x_max if x_max > 0 else 1.0])
                     ax.set_ylim([0, 1.1])
                     ax.legend(fontsize=7)
                 _annotate_photon_count(ax, m.get("n_captured", 0))
